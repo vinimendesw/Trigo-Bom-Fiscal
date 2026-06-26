@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nfeProc xmlns="http://www.portalfiscal.inf.br/nfe" versao="4.00">
+  <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
+    <infNFe Id="NFe43260601234567000100550010000004521000004521" versao="4.00">
+      <ide>
+        <cUF>43</cUF>
+        <cNF>00004521</cNF>
+        <natOp>VENDA DE MERCADORIA</natOp>
+        <mod>55</mod>
+        <serie>1</serie>
+        <nNF>452</nNF>
+        <dhEmi>2026-06-20T10:30:00-03:00</dhEmi>
+        <tpNF>1</tpNF>
+        <idDest>1</idDest>
+      </ide>
+      <emit>
+        <CNPJ>01234567000100</CNPJ>
+        <xNome>Distribuidora Central Ltda</xNome>
+        <xFant>Distribuidora Central</xFant>
+      </emit>
+      <det nItem="1">
+        <prod>
+          <cProd>001</cProd>
+          <cEAN>7891234567890</cEAN>
+          <xProd>Arroz Tipo 1 5kg</xProd>
+          <NCM>10063021</NCM>
+          <CFOP>5102</CFOP>
+          <uCom>KG</uCom>
+          <qCom>10.0000</qCom>
+          <vUnCom>25.0000000000</vUnCom>
+          <vProd>250.00</vProd>
+        </prod>
+      </det>
+      <det nItem="2">
+        <prod>
+          <cProd>002</cProd>
+          <cEAN>7891234567891</cEAN>
+          <xProd>Feijão Carioca 1kg</xProd>
+          <NCM>07133310</NCM>
+          <CFOP>5102</CFOP>
+          <uCom>KG</uCom>
+          <qCom>20.0000</qCom>
+          <vUnCom>8.5000000000</vUnCom>
+          <vProd>170.00</vProd>
+        </prod>
+      </det>
+      <total>
+        <ICMSTot>
+          <vBC>0.00</vBC>
+          <vICMS>0.00</vICMS>
+          <vProd>420.00</vProd>
+          <vNF>420.00</vNF>
+        </ICMSTot>
+      </total>
+    </infNFe>
+  </NFe>
+</nfeProc>

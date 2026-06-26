@@ -1,0 +1,31 @@
+# Ambientes virtuais Python
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Testes / cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build / distribuição
+build/
+dist/
+*.spec
+
+# Banco e dados locais (não devem ir para o repositório)
+*.db
+*.sqlite
+*.sqlite3
+
+# Configuração local de pastas do usuário (gerada em runtime, fora do projeto normalmente,
+# mas listada por segurança caso apareça aqui)
+config.json
+
+# Editor / SO
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
