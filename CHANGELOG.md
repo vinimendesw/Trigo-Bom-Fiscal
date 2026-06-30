@@ -17,6 +17,17 @@ Entradas mais recentes ficam no topo.
 
 ---
 
+## [2026-06-30] Verificação de atualização disponível
+
+- Adicionado `app/atualizacao.py`: consulta `https://api.github.com/repos/vinimendesw/Trigo-Bom-Fiscal/releases/latest` em thread de background (QThreadPool) 3 s após a janela abrir, compara a tag remota com `__version__` via semver (`packaging.version.Version`) e emite sinal `nova_versao` se houver release mais nova.
+- Integrado em `app/main.py`: ao receber o sinal, exibe QMessageBox com a tag e o link clicável para a Release no GitHub. Sem download silencioso.
+- Falhas de rede/rede indisponível são silenciadas — o app continua normalmente.
+- `packaging==26.2` adicionado ao `requirements.txt` (já estava no venv como dependência transitiva; agora declarado explicitamente).
+
+**Arquivos afetados:** `trigo_bom/app/atualizacao.py` (novo), `trigo_bom/app/main.py`, `trigo_bom/requirements.txt`
+
+---
+
 ## [2026-06-30] Infraestrutura de build e empacotamento implementada
 
 - `requirements.txt` atualizado: todos os `>=` trocados por `==` com as

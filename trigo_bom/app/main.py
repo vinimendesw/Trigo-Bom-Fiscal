@@ -4,11 +4,12 @@ import ctypes
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
-from PySide6.QtCore import QUrl, QTimer
+from PySide6.QtCore import QUrl, QTimer, Qt
 from PySide6.QtGui import QIcon
 
 from bridge import Bridge
 import backup
+from atualizacao import VerificadorAtualizacao
 
 _BACKUP_INTERVAL_MS = 10 * 60 * 1000  # 10 minutos
 
@@ -77,6 +78,25 @@ def main():
         view.setWindowIcon(icon)
     view.resize(1280, 800)
     view.show()
+
+    # Verificação de atualização — roda em background, não bloqueia a UI
+    _verificador = VerificadorAtualizacao()
+
+    def _avisar_nova_versao(tag: str, url: str):
+        msg = QMessageBox(view)
+        msg.setWindowTitle("Atualização disponível")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(
+            f"Uma nova versão do TrigoBom está disponível: <b>{tag}</b>.<br><br>"
+            f"Acesse o link abaixo para baixar o instalador:<br>"
+            f'<a href="{url}">{url}</a>'
+        )
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+
+    _verificador.nova_versao.connect(_avisar_nova_versao)
+    QTimer.singleShot(3000, _verificador.verificar)
 
     # Timer de backup automático a cada 10 minutos
     timer_backup = QTimer(app)
