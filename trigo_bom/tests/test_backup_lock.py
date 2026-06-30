@@ -74,16 +74,50 @@ def test_verificar_backup_retorna_none_sem_meta(ambiente):
     assert bkp.verificar_backup_mais_novo() is None
 
 
-def test_verificar_backup_retorna_meta_quando_backup_e_mais_novo(ambiente):
+def test_verificar_backup_retorna_meta_quando_versao_e_maior(ambiente):
+    bkp.fazer_backup()  # meta e versão local na versão 1
+
+    # Simula um backup vindo de OUTRO dispositivo, com versão maior
+    meta_path = ambiente["backup_dir"] / "trigo_bom_backup.json"
+    meta = json.loads(meta_path.read_text())
+    meta["versao"] = meta["versao"] + 5
+    meta_path.write_text(json.dumps(meta))
+
+    res = bkp.verificar_backup_mais_novo()
+    assert res is not None
+    assert res["versao"] == 6
+
+
+def test_verificar_backup_retorna_none_para_proprio_backup(ambiente):
+    # Logo após o próprio backup, versão local == versão do meta → nada a restaurar
     bkp.fazer_backup()
+    assert bkp.verificar_backup_mais_novo() is None
 
-    # Faz o banco local parecer mais antigo manipulando mtime
-    import os, time
-    os.utime(ambiente["db"], (time.time() - 120, time.time() - 120))
 
-    meta = bkp.verificar_backup_mais_novo()
-    assert meta is not None
-    assert "ts" in meta
+def test_versao_incrementa_a_cada_backup(ambiente):
+    bkp.fazer_backup()
+    meta1 = json.loads((ambiente["backup_dir"] / "trigo_bom_backup.json").read_text())
+    bkp.fazer_backup()
+    meta2 = json.loads((ambiente["backup_dir"] / "trigo_bom_backup.json").read_text())
+    assert meta1["versao"] == 1
+    assert meta2["versao"] == 2
+
+
+def test_versao_maior_vence_mtime_local_mais_novo(ambiente):
+    # Versão monotônica não depende do relógio: um backup com versão maior é
+    # oferecido para restauração mesmo com o banco local com mtime mais novo.
+    bkp.fazer_backup()
+    meta_path = ambiente["backup_dir"] / "trigo_bom_backup.json"
+    meta = json.loads(meta_path.read_text())
+    meta["versao"] = 99
+    meta_path.write_text(json.dumps(meta))
+
+    import os
+    os.utime(ambiente["db"], None)  # mtime do banco local = agora
+
+    res = bkp.verificar_backup_mais_novo()
+    assert res is not None
+    assert res["versao"] == 99
 
 
 def test_verificar_backup_retorna_none_quando_local_e_mais_novo(ambiente):
@@ -109,6 +143,19 @@ def test_restaurar_backup_sobrescreve_banco_local(ambiente):
     ok = bkp.restaurar_backup()
     assert ok is True
     assert ambiente["db"].read_bytes() == b"SQLITE_BACKUP"
+
+
+def test_restaurar_alinha_versao_local(ambiente):
+    # Backup de outro dispositivo na versão 7
+    (ambiente["backup_dir"] / "trigo_bom.db").write_bytes(b"SQLITE_BACKUP")
+    meta = {"ts": datetime.now().isoformat(), "hostname": "outro", "versao": 7}
+    (ambiente["backup_dir"] / "trigo_bom_backup.json").write_text(json.dumps(meta))
+
+    # Antes: local na versão 0 < 7 → restauração é oferecida
+    assert bkp.verificar_backup_mais_novo() is not None
+    bkp.restaurar_backup()
+    # Depois: versão local alinhada à do backup → não reoferece a mesma restauração
+    assert bkp.verificar_backup_mais_novo() is None
 
 
 # ── Lock ──────────────────────────────────────────────────────────────────────

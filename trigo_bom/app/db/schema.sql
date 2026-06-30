@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS itens_nota_fiscal (
     cfop            TEXT
 );
 
+CREATE TABLE IF NOT EXISTS listas_compra (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome            TEXT NOT NULL,
+    data_prevista   TEXT,
+    status_entrega  TEXT DEFAULT 'pendente',
+    criado_em       TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS ordens_compra (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     numero                TEXT,
@@ -49,6 +57,7 @@ CREATE TABLE IF NOT EXISTS itens_ordem_compra (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     ordem_compra_id INTEGER REFERENCES ordens_compra(id) ON DELETE CASCADE,
     descricao       TEXT,
+    unidade         TEXT,
     quantidade      REAL,
     valor_unitario  REAL,
     valor_total     REAL

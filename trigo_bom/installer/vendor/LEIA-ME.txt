@@ -1,0 +1,16 @@
+Este diretorio deve conter o instalador do Tesseract OCR (build UB-Mannheim)
+para que o build.ps1 possa empacotar o Tesseract dentro do TrigoBomSetup.exe.
+
+Como obter:
+  1. Acesse: https://github.com/UB-Mannheim/tesseract/wiki
+  2. Baixe o instalador Windows x64 mais recente
+     (ex.: tesseract-ocr-w64-setup-5.5.0.20241111.exe)
+  3. Renomeie o arquivo para: tesseract-setup.exe
+  4. Coloque-o nesta pasta (installer/vendor/tesseract-setup.exe)
+
+O arquivo tesseract-setup.exe NAO esta no repositorio git (tamanho ~70 MB).
+Ele precisa ser baixado manualmente antes de rodar o build.ps1.
+
+Sem este arquivo, o build.ps1 ainda gera o TrigoBomSetup.exe, mas sem
+incluir o Tesseract. O usuario devera instala-lo manualmente se precisar
+do OCR para PDFs com texto corrompido (ver CLAUDE.md, secao 11).

@@ -1,14 +1,17 @@
 import sys
 import os
+import ctypes
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtCore import QUrl, QTimer
+from PySide6.QtGui import QIcon
 
 from bridge import Bridge
 import backup
 
 _BACKUP_INTERVAL_MS = 10 * 60 * 1000  # 10 minutos
+
 
 
 def _checar_backup_e_lock(app: QApplication) -> None:
@@ -43,7 +46,21 @@ def _checar_backup_e_lock(app: QApplication) -> None:
 
 
 def main():
+    # Define AppUserModelID antes de criar a QApplication para que o Windows
+    # use o ícone do app na barra de tarefas em vez do ícone do Python.
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TrigoBom.Fiscal.1")
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
+
+    # Ícone do app (espiga dourada) — .ico com múltiplas resoluções para barra de tarefas
+    icone_path = os.path.join(os.path.dirname(__file__), "ui", "assets", "icone.ico")
+    if os.path.exists(icone_path):
+        icon = QIcon(icone_path)
+        app.setWindowIcon(icon)
 
     _checar_backup_e_lock(app)
 
@@ -56,6 +73,8 @@ def main():
     ui_path = os.path.join(os.path.dirname(__file__), "ui", "index.html")
     view.setUrl(QUrl.fromLocalFile(ui_path))
     view.setWindowTitle("TrigoBom Fiscal")
+    if os.path.exists(icone_path):
+        view.setWindowIcon(icon)
     view.resize(1280, 800)
     view.show()
 

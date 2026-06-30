@@ -2,15 +2,21 @@
 
 // ─── Estado global ────────────────────────────────────────────────────────────
 const estado = {
+  viewAtual:      'dashboard',
   mesAtual:       new Date(),
   nfs:            [],           // todas as NFs (cache)
-  ocs:            [],           // OCs com itens aninhados
+  ocs:            [],           // OCs com itens aninhados (legado)
+  listas:         [],           // listas de compra com OCs e itens agregados
+  ocsSemLista:    [],           // OCs sem lista_id
+  listaAtualId:   null,         // lista em que OCs estão sendo adicionadas
+  listasAbertas:  new Set(),    // ids de listas com card expandido (preserva entre renders)
+  ocsAbertas:     new Set(),    // ids de listas com a sub-lista de OCs expandida
   config:         {},
   // Detalhe NF
   nfAtual:        null,
   viewAnteriorNF: 'pagamentos',
   // Filtros NF
-  filtros:        { orgao_id: '', categoria: '', status: '', mes: '' },
+  filtros:        { orgao_id: '', status: '', mes: '' },
   // Marcação em massa
   selecionadas:   new Set(),
   // Formulário NF
@@ -22,6 +28,17 @@ const estado = {
   // Formulário OC lote
   ocFilaLote:     [],
   ocFilaIdx:      0,
+  // Exclusão de OC
+  selecionadasOC: new Set(),
+  ocExcluindoId:  null,
+  // Exclusão de NF
+  nfExcluindoId:  null,
+  nfExcluindoIds: [],
+  // Exclusão de lista
+  listaExcluindoId: null,
+  // Extração assíncrona (correlação request_id → callback)
+  pendentesExtracao: {},
+  reqSeq:          0,
 };
 
 const ORGAOS = { 1: 'Administração', 2: 'Saúde', 3: 'Educação', 4: 'Assistência Social' };
@@ -29,7 +46,39 @@ const CORES_ORGAO = { 1: '#c90914', 2: '#f2972c', 3: '#1a1a1a', 4: '#2e7d32' };
 const MESES  = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho',
                  'Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 
+// ─── FAB contextual (Incluir NF / Incluir OC) ─────────────────────────────────
+const ICONE_FAB_NF = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="12" x2="12" y2="18"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>';
+const ICONE_FAB_OC = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="20" r="1"></circle><circle cx="18" cy="20" r="1"></circle><path d="M3 4h2l2.4 12.4a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L21 8H6"></path><line x1="17" y1="2" x2="17" y2="6"></line><line x1="15" y1="4" x2="19" y2="4"></line></svg>';
+const FAB_CONFIG = {
+  pagamentos: { label: 'Incluir NF',  icone: ICONE_FAB_NF, acao: () => document.getElementById('btn-incluir-nf').click() },
+  agenda:     { label: 'Nova lista',  icone: ICONE_FAB_OC, acao: () => document.getElementById('btn-nova-lista').click() },
+};
+function atualizarFab(view) {
+  const fab = document.getElementById('fab-incluir');
+  const cfg = FAB_CONFIG[view];
+  if (cfg) {
+    document.getElementById('fab-icon').innerHTML = cfg.icone;
+    document.getElementById('fab-label').textContent = cfg.label;
+    fab.style.display = 'flex';
+  } else {
+    fab.style.display = 'none';
+  }
+}
+
 // ─── Utilitários ──────────────────────────────────────────────────────────────
+// Escapa texto vindo de extração de PDF/XML ou do banco antes de interpolá-lo em
+// template strings que viram innerHTML. Sem isso, uma descrição de item ou nome
+// de fornecedor contendo <, > , & ou aspas quebra a renderização (ou injeta
+// marcação). Não usar em valores numéricos já formatados por fmtBRL.
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 function fmtBRL(v) {
   if (v == null || isNaN(v)) return '—';
   return 'R$ ' + Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -60,6 +109,29 @@ function mostrarToast(msg, erro = false) {
   t._timer = setTimeout(() => { t.className = 'toast'; }, 3000);
 }
 
+// Estado "lendo" durante a extração assíncrona (a janela não congela mais, então
+// é preciso sinalizar visualmente que há trabalho em andamento).
+function _desabilitar(ids, desabilitar) {
+  ids.forEach(id => { const b = document.getElementById(id); if (b) b.disabled = desabilitar; });
+}
+function mostrarLendoOC(lendo) {
+  document.getElementById('oc-lendo').style.display = lendo ? 'flex' : 'none';
+  const card = document.getElementById('oc-confirmacao-card');
+  if (card) card.style.display = lendo ? 'none' : '';
+  _desabilitar(['btn-salvar-oc', 'btn-pular-oc'], lendo);
+}
+function mostrarLendoNF(lendo) {
+  document.getElementById('nf-lendo').style.display = lendo ? 'flex' : 'none';
+  if (lendo) {
+    // Esconde upload, formulário e abas de modo enquanto a leitura roda; o
+    // formulário reaparece quando o resultado da extração chega.
+    document.getElementById('nf-sec-arquivo').style.display = 'none';
+    document.getElementById('nf-form-dados').style.display  = 'none';
+    document.getElementById('nf-modo-wrap').style.display   = 'none';
+  }
+  _desabilitar(['btn-salvar-nf', 'btn-pular-nf', 'btn-cancelar-nf2'], lendo);
+}
+
 // ─── Navegação ────────────────────────────────────────────────────────────────
 function navegarPara(view, navKey) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -70,6 +142,8 @@ function navegarPara(view, navKey) {
     if (link) link.classList.add('active');
   }
   document.querySelector('.shell').scrollTop = 0;
+  estado.viewAtual = view;
+  atualizarFab(view);
 }
 
 // ─── Inicialização ────────────────────────────────────────────────────────────
@@ -81,8 +155,21 @@ new QWebChannel(qt.webChannelTransport, channel => {
 function iniciar() {
   atualizarHora();
   setInterval(atualizarHora, 60000);
+  // Resultado da extração assíncrona volta por sinal Qt, correlacionado por id.
+  backend.extracaoConcluida.connect((requestId, json) => {
+    const cb = estado.pendentesExtracao[requestId];
+    if (cb) { delete estado.pendentesExtracao[requestId]; cb(json); }
+  });
   vincularEventos();
   carregarTudo();
+}
+
+// Dispara a extração (PDF/XML) fora da thread da GUI; `callback(jsonString)` é
+// chamado quando o backend devolve o resultado pelo sinal extracaoConcluida.
+function extrairAsync(metodo, caminho, callback) {
+  const reqId = 'req-' + (++estado.reqSeq);
+  estado.pendentesExtracao[reqId] = callback;
+  backend[metodo](reqId, caminho);
 }
 function atualizarHora() {
   const ag = new Date();
@@ -91,8 +178,25 @@ function atualizarHora() {
 }
 function carregarTudo() {
   backend.listar_nfs(raw => { estado.nfs = JSON.parse(raw); renderDashboard(); renderNFs(); });
-  backend.listar_ordens_compra_com_itens(raw => { estado.ocs = JSON.parse(raw); renderLista(); });
+  backend.listar_listas_com_ocs(raw => {
+    estado.listas = JSON.parse(raw);
+    backend.listar_ocs_sem_lista(raw2 => {
+      estado.ocsSemLista = JSON.parse(raw2);
+      renderListaCompras();
+    });
+  });
   backend.carregar_config(raw => { estado.config = JSON.parse(raw); renderConfiguracoes(); });
+}
+
+function recarregarListas(cb) {
+  backend.listar_listas_com_ocs(raw => {
+    estado.listas = JSON.parse(raw);
+    backend.listar_ocs_sem_lista(raw2 => {
+      estado.ocsSemLista = JSON.parse(raw2);
+      renderListaCompras();
+      if (cb) cb();
+    });
+  });
 }
 
 // ─── Vínculos ─────────────────────────────────────────────────────────────────
@@ -100,6 +204,12 @@ function vincularEventos() {
   // Sidebar
   document.querySelectorAll('.nav-link').forEach(link => {
     link.addEventListener('click', () => navegarPara(link.dataset.view, link.dataset.view));
+  });
+
+  // FAB contextual
+  document.getElementById('fab-incluir').addEventListener('click', () => {
+    const cfg = FAB_CONFIG[estado.viewAtual];
+    if (cfg) cfg.acao();
   });
   document.addEventListener('click', e => {
     const el = e.target.closest('.link-action[data-view]');
@@ -117,10 +227,25 @@ function vincularEventos() {
   });
 
   // Lista de compras
-  document.getElementById('btn-incluir-oc').addEventListener('click', () => {
-    resetarFormOC();
-    navegarPara('incluir-oc', 'agenda');
+  document.getElementById('btn-nova-lista').addEventListener('click', () => {
+    document.getElementById('nova-lista-data').value = '';
+    document.getElementById('modal-nova-lista').style.display = 'flex';
   });
+  document.getElementById('modal-nova-lista-fechar').addEventListener('click', () => document.getElementById('modal-nova-lista').style.display = 'none');
+  document.getElementById('modal-nova-lista-cancelar').addEventListener('click', () => document.getElementById('modal-nova-lista').style.display = 'none');
+  document.getElementById('modal-nova-lista-confirmar').addEventListener('click', criarLista);
+  document.getElementById('modal-nova-lista').addEventListener('click', e => {
+    if (e.target === e.currentTarget) document.getElementById('modal-nova-lista').style.display = 'none';
+  });
+
+  document.getElementById('modal-excluir-lista-fechar').addEventListener('click', fecharModalExcluirLista);
+  document.getElementById('modal-excluir-lista-cancelar').addEventListener('click', fecharModalExcluirLista);
+  document.getElementById('modal-excluir-lista-confirmar').addEventListener('click', confirmarExcluirLista);
+  document.getElementById('modal-excluir-lista').addEventListener('click', e => {
+    if (e.target === e.currentTarget) fecharModalExcluirLista();
+  });
+
+  // OC — form de inclusão
   document.getElementById('btn-cancelar-oc').addEventListener('click', () => navegarPara('agenda', 'agenda'));
   document.getElementById('oc-upload-zone').addEventListener('click', () => abrirPDFsOC());
   document.getElementById('btn-salvar-oc').addEventListener('click', salvarOCAtual);
@@ -136,12 +261,17 @@ function vincularEventos() {
   document.getElementById('btn-cancelar-nf2').addEventListener('click', () => navegarPara(estado.viewAnteriorNF, estado.viewAnteriorNF));
 
   // Filtros NF
-  ['filtro-orgao','filtro-categoria','filtro-status','filtro-mes'].forEach(id => {
+  ['filtro-orgao','filtro-status','filtro-mes'].forEach(id => {
     document.getElementById(id).addEventListener('change', aplicarFiltros);
   });
   document.getElementById('btn-limpar-filtros').addEventListener('click', limparFiltros);
+  document.getElementById('btn-toggle-filtros').addEventListener('click', () => {
+    const painel = document.getElementById('filtros-painel');
+    painel.style.display = painel.style.display !== 'none' ? 'none' : 'flex';
+  });
 
-  // Checkbox "selecionar todas"
+  // Checkbox "selecionar todas" — ajusta os checkboxes existentes e a barra,
+  // sem reconstruir os cards (evita os mesmos artefatos do toggle individual).
   document.getElementById('check-todos-np').addEventListener('change', e => {
     const nfsVisiveis = nfsFiltradas().filter(nf => nf.status_pagamento !== 'pago');
     if (e.target.checked) {
@@ -149,7 +279,10 @@ function vincularEventos() {
     } else {
       estado.selecionadas.clear();
     }
-    renderNFs();
+    document.querySelectorAll('.nf-checkbox').forEach(cb => {
+      cb.checked = estado.selecionadas.has(parseInt(cb.dataset.nfId));
+    });
+    atualizarBarraMassa();
   });
 
   // Marcação em massa
@@ -161,13 +294,35 @@ function vincularEventos() {
   });
   document.getElementById('btn-cancelar-massa').addEventListener('click', () => {
     estado.selecionadas.clear();
-    renderNFs();
+    document.querySelectorAll('.nf-checkbox').forEach(cb => cb.checked = false);
+    const todos = document.getElementById('check-todos-np');
+    if (todos) todos.checked = false;
+    atualizarBarraMassa();
   });
   document.getElementById('modal-massa-fechar').addEventListener('click', () => document.getElementById('modal-massa').style.display = 'none');
   document.getElementById('modal-massa-cancelar').addEventListener('click', () => document.getElementById('modal-massa').style.display = 'none');
   document.getElementById('modal-massa-confirmar').addEventListener('click', confirmarMassa);
   document.getElementById('modal-massa').addEventListener('click', e => {
     if (e.target === e.currentTarget) document.getElementById('modal-massa').style.display = 'none';
+  });
+
+  // Modal excluir OC (individual — ainda usado via botão no card de OC dentro da lista)
+  document.getElementById('modal-excluir-oc-fechar').addEventListener('click', fecharModalExcluirOC);
+  document.getElementById('modal-excluir-oc-cancelar').addEventListener('click', fecharModalExcluirOC);
+  document.getElementById('modal-excluir-oc-confirmar').addEventListener('click', confirmarExcluirOC);
+  document.getElementById('modal-excluir-oc').addEventListener('click', e => {
+    if (e.target === e.currentTarget) fecharModalExcluirOC();
+  });
+
+  // Exclusão de NF — barra de massa e modal
+  document.getElementById('btn-excluir-massa-nf').addEventListener('click', () => {
+    abrirModalExcluirNF(null, [...estado.selecionadas]);
+  });
+  document.getElementById('modal-excluir-nf-fechar').addEventListener('click', fecharModalExcluirNF);
+  document.getElementById('modal-excluir-nf-cancelar').addEventListener('click', fecharModalExcluirNF);
+  document.getElementById('modal-excluir-nf-confirmar').addEventListener('click', confirmarExcluirNF);
+  document.getElementById('modal-excluir-nf').addEventListener('click', e => {
+    if (e.target === e.currentTarget) fecharModalExcluirNF();
   });
 
   // Modal pagamento simples
@@ -207,10 +362,10 @@ function vincularEventos() {
     document.getElementById('field-data-pagamento').style.display = 'none';
   });
   vincularTagsUnicas('nf-orgao-tags');
-  vincularTagsUnicas('nf-categoria-tags');
+  // #nf-categoria-tags removido do HTML (2026-06-29) — sem vínculo aqui.
   document.getElementById('btn-salvar-nf').addEventListener('click', salvarNFAtual);
   document.getElementById('btn-pular-nf').addEventListener('click', avancarNFLote);
-  document.getElementById('btn-add-item-nf').addEventListener('click', adicionarLinhaItemNF);
+  // #btn-add-item-nf removido do HTML (2026-06-29) — sem vínculo aqui.
 
   // Configurações
   document.querySelectorAll('.btn-escolher-pasta').forEach(btn => {
@@ -256,14 +411,23 @@ function renderDashboard() {
     pills.appendChild(pill);
   }
 
+  // nfsMes: NFs emitidas no mês — base do KPI "Entradas" e da tabela do dashboard
   const nfsMes = estado.nfs.filter(nf => {
     if (!nf.data_emissao) return false;
     const [y, m] = nf.data_emissao.split('-').map(Number);
     return y === ano && m === mes + 1;
   });
 
+  // nfsRecebidasMes: NFs pagas no mês (por data_pagamento) — base do KPI "Recebido"
+  // e do gráfico de pizza. Mistura intencional de bases (regime de caixa para "recebido").
+  const nfsRecebidasMes = estado.nfs.filter(nf => {
+    if (!nf.data_pagamento) return false;
+    const [y, m] = nf.data_pagamento.split('-').map(Number);
+    return y === ano && m === mes + 1;
+  });
+
   const entradas  = nfsMes.reduce((s, nf) => s + (nf.valor || 0), 0);
-  const recebido  = nfsMes.filter(nf => nf.status_pagamento === 'pago').reduce((s, nf) => s + (nf.valor || 0), 0);
+  const recebido  = nfsRecebidasMes.reduce((s, nf) => s + (nf.valor || 0), 0);
   const pendentes = nfsMes.filter(nf => nf.status_pagamento !== 'pago').length;
 
   document.getElementById('kpi-entradas').textContent = fmtBRL(entradas);
@@ -273,8 +437,8 @@ function renderDashboard() {
     ? `${pendentes} NF${pendentes > 1 ? 's' : ''} pendente${pendentes > 1 ? 's' : ''}`
     : 'Tudo em dia';
 
-  // Gráfico de pizza por órgão
-  renderPieOrgao(mes + 1, ano, nfsMes);
+  // Faturado (emissão) x Recebido (pagamento) por órgão, ambos no mês selecionado
+  renderBarsOrgao(nfsMes, nfsRecebidasMes);
 
   // Status
   const pagas = nfsMes.filter(nf => nf.status_pagamento === 'pago').length;
@@ -297,9 +461,8 @@ function renderDashboard() {
     empty.style.display = 'none';
     tbody.innerHTML = nfsMes.slice(0, 10).map(nf => `
       <tr style="cursor:pointer;" data-nf-id="${nf.id}">
-        <td>NF ${nf.numero || '—'}</td>
-        <td>${nf.fornecedor || '—'}</td>
-        <td>${nf.orgao_nome || '—'}</td>
+        <td>NF ${escapeHtml(nf.numero) || '—'}</td>
+        <td>${escapeHtml(nf.orgao_nome) || '—'}</td>
         <td>${fmtData(nf.data_emissao)}</td>
         <td>${fmtBRL(nf.valor)}</td>
         <td><span class="status-pill ${nf.status_pagamento === 'pago' ? 'pago' : 'nao-pago'}">${nf.status_pagamento === 'pago' ? 'pago' : 'não pago'}</span></td>
@@ -310,129 +473,317 @@ function renderDashboard() {
   }
 }
 
-function renderPieOrgao(mes, ano, nfsMes) {
-  // Agrega por órgão a partir do cache local (sem nova chamada ao backend)
-  const totais = { 1: 0, 2: 0, 3: 0, 4: 0 };
-  nfsMes.forEach(nf => { if (nf.orgao_id) totais[nf.orgao_id] = (totais[nf.orgao_id] || 0) + (nf.valor || 0); });
-  const somaTotal = Object.values(totais).reduce((a, b) => a + b, 0);
+function renderBarsOrgao(nfsFaturadoMes, nfsRecebidoMes) {
+  // Agrega faturado (emissão) e recebido (pagamento) por órgão, a partir do cache local.
+  const faturado = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  const recebido  = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  nfsFaturadoMes.forEach(nf => { if (nf.orgao_id) faturado[nf.orgao_id] = (faturado[nf.orgao_id] || 0) + (nf.valor || 0); });
+  nfsRecebidoMes.forEach(nf => { if (nf.orgao_id) recebido[nf.orgao_id]  = (recebido[nf.orgao_id] || 0) + (nf.valor || 0); });
 
-  const pie    = document.getElementById('dash-pie');
-  const legend = document.getElementById('dash-pie-legend');
+  const container = document.getElementById('dash-orgao-bars');
+  const maxValor = Math.max(...Object.keys(ORGAOS).map(id => Math.max(faturado[id] || 0, recebido[id] || 0)), 0);
 
-  if (somaTotal === 0) {
-    pie.style.background = '#f1f1f1';
-    legend.innerHTML = '<div style="color:#bbb;font-size:13px;">Sem notas neste mês.</div>';
+  if (maxValor === 0) {
+    container.innerHTML = '<div class="orgao-bars-empty">Sem notas neste mês.</div>';
     return;
   }
 
-  // Constrói conic-gradient
-  let acum = 0;
-  const partes = Object.entries(totais).map(([id, val]) => {
-    const pct = somaTotal > 0 ? (val / somaTotal) * 100 : 0;
-    const trecho = `${CORES_ORGAO[id]} ${acum.toFixed(2)}% ${(acum + pct).toFixed(2)}%`;
-    acum += pct;
-    return { id: parseInt(id), val, pct, trecho };
-  });
-
-  pie.style.background = `conic-gradient(${partes.map(p => p.trecho).join(', ')})`;
-
-  legend.innerHTML = partes.map(p => `
-    <div class="legend-item">
-      <span class="sw" style="background:${CORES_ORGAO[p.id]};"></span>
-      ${ORGAOS[p.id]}
-      <span class="val">${fmtBRL(p.val)}</span>
-    </div>`).join('');
+  const ALTURA_MAX = 116; // px, deve casar com .orgao-bar-pair { height }
+  container.innerHTML = Object.keys(ORGAOS).map(id => {
+    const fVal = faturado[id] || 0;
+    const rVal = recebido[id]  || 0;
+    const fAlt = Math.max(fVal > 0 ? (fVal / maxValor) * ALTURA_MAX : 0, fVal > 0 ? 2 : 0);
+    const rAlt = Math.max(rVal > 0 ? (rVal / maxValor) * ALTURA_MAX : 0, rVal > 0 ? 2 : 0);
+    return `
+      <div class="orgao-bar-group">
+        <div class="orgao-bar-pair">
+          <div class="orgao-bar faturado" style="height:${fAlt.toFixed(1)}px;" title="Faturado: ${fmtBRL(fVal)}"></div>
+          <div class="orgao-bar recebido" style="height:${rAlt.toFixed(1)}px;" title="Recebido: ${fmtBRL(rVal)}"></div>
+        </div>
+        <div class="orgao-bar-label">${ORGAOS[id]}</div>
+      </div>`;
+  }).join('');
 }
 
-// ─── LISTA DE COMPRAS ─────────────────────────────────────────────────────────
-function renderLista() {
-  const lista = document.getElementById('lista-ocs');
-  const empty = document.getElementById('agenda-empty');
-  const total = estado.ocs.length;
+// ─── LISTA DE COMPRAS — renderização principal ────────────────────────────────
+const PILL_CLS = { pendente: 'pendente', atrasada: 'atrasada', entregue: 'entregue' };
 
-  document.getElementById('agenda-badge').textContent = total
-    ? `${total} OC${total > 1 ? 's' : ''}` : 'Nenhuma OC';
-  empty.style.display = total === 0 ? '' : 'none';
+function renderListaCompras() {
+  const container = document.getElementById('container-listas');
+  const empty     = document.getElementById('agenda-empty');
+  const semLista  = document.getElementById('secao-sem-lista');
 
-  if (!total) { lista.innerHTML = ''; return; }
+  const totalListas = estado.listas.length;
+  const totalAvulas = estado.ocsSemLista.length;
 
-  lista.innerHTML = estado.ocs.map(oc => {
-    const dias   = diasAte(oc.data_entrega_prevista);
-    const status = oc.status_entrega || 'pendente';
-    const corBorda = status === 'entregue' ? '#2e7d32' : status === 'atrasada' ? '#c90914' : '#f2972c';
-    const pillClass = status === 'entregue' ? 'entregue' : status === 'atrasada' ? 'atrasada' : 'pendente';
-    let prazoLabel = '';
-    if (status === 'entregue') prazoLabel = 'Entregue';
-    else if (dias == null) prazoLabel = 'Sem prazo';
-    else if (dias < 0)    prazoLabel = `${Math.abs(dias)}d atraso`;
-    else if (dias === 0)  prazoLabel = 'Hoje';
-    else if (dias === 1)  prazoLabel = 'Amanhã';
-    else                  prazoLabel = `Em ${dias}d`;
+  document.getElementById('agenda-badge').textContent = totalListas
+    ? `${totalListas} lista${totalListas > 1 ? 's' : ''}` : 'Nenhuma lista';
+  empty.style.display = totalListas === 0 ? '' : 'none';
 
-    const itensHTML = oc.itens && oc.itens.length
-      ? `<table class="oc-itens-inline">
-           <thead><tr><th>Descrição</th><th>Qtd</th><th>Valor Unit.</th><th>Total</th></tr></thead>
-           <tbody>${oc.itens.map(it => `
-             <tr>
-               <td>${it.descricao || '—'}</td>
-               <td>${it.quantidade != null ? it.quantidade : '—'}</td>
-               <td>${fmtBRL(it.valor_unitario)}</td>
-               <td>${fmtBRL(it.valor_total)}</td>
-             </tr>`).join('')}
-           </tbody>
-         </table>`
-      : '<div class="oc-sem-itens">Nenhum item registrado.</div>';
+  // Descarta de listasAbertas/ocsAbertas ids que não existem mais
+  const idsValidos = new Set(estado.listas.map(l => l.id));
+  estado.listasAbertas.forEach(id => { if (!idsValidos.has(id)) estado.listasAbertas.delete(id); });
+  estado.ocsAbertas.forEach(id => { if (!idsValidos.has(id)) estado.ocsAbertas.delete(id); });
 
-    const exportBtn = oc.itens && oc.itens.length
-      ? `<button class="btn-export-oc" data-oc-id="${oc.id}">↓ Exportar xlsx</button>` : '';
+  container.innerHTML = estado.listas.map(_htmlCardLista).join('');
+  _vincularEventosListas(container);
 
-    return `<div class="oc-card" style="border-left-color:${corBorda};">
-      <div class="oc-card-header">
-        <div class="oc-card-info">
-          <div class="oc-num">OC ${oc.numero || oc.id}</div>
-          <div class="oc-forn">${oc.fornecedor || '—'}</div>
-          <div class="oc-data">${oc.data_entrega_prevista ? 'Entrega: ' + fmtData(oc.data_entrega_prevista) : 'Sem data de entrega'}</div>
-        </div>
-        <div class="oc-card-actions">
-          <span class="status-pill ${pillClass}">${prazoLabel}</span>
-          ${exportBtn}
-          <select class="oc-status-select" data-oc-id="${oc.id}">
-            <option value="pendente"${status==='pendente'?' selected':''}>Pendente</option>
-            <option value="atrasada"${status==='atrasada'?' selected':''}>Atrasada</option>
-            <option value="entregue"${status==='entregue'?' selected':''}>Entregue</option>
-          </select>
+  // ── Seção "Sem lista" ─────────────────────────────────────────────────────
+  semLista.style.display = totalAvulas > 0 ? '' : 'none';
+  if (totalAvulas > 0) {
+    const avulsas = document.getElementById('lista-ocs-avulsas');
+    avulsas.innerHTML = estado.ocsSemLista.map(oc => _htmlOCInterna(oc)).join('');
+    avulsas.querySelectorAll('.btn-excluir-oc').forEach(btn => {
+      btn.addEventListener('click', () => abrirModalExcluirOC(parseInt(btn.dataset.ocId), null));
+    });
+  }
+}
+
+function _htmlCardLista(lista) {
+  const status    = lista.status_entrega || 'pendente';
+  const pillCls   = PILL_CLS[status] || 'pendente';
+  const dataLabel = lista.data_prevista ? 'Entrega: ' + fmtData(lista.data_prevista) : 'Sem prazo';
+  const abertaCard = estado.listasAbertas.has(lista.id);
+  const abertaOcs  = estado.ocsAbertas.has(lista.id);
+
+  const agregadosHTML = lista.itens_agregados && lista.itens_agregados.length
+    ? `<table>
+         <thead><tr><th>Descrição</th><th>UN</th><th>Qtd</th><th>Valor Unit.</th><th>Total</th></tr></thead>
+         <tbody>${lista.itens_agregados.map(it => `
+           <tr>
+             <td>${escapeHtml(it.descricao) || '—'}</td>
+             <td>${escapeHtml(it.unidade)}</td>
+             <td>${it.quantidade != null ? Number(it.quantidade).toLocaleString('pt-BR') : '—'}</td>
+             <td>${fmtBRL(it.valor_unitario)}</td>
+             <td>${fmtBRL(it.valor_total)}</td>
+           </tr>`).join('')}
+         </tbody>
+       </table>`
+    : '<div class="oc-sem-itens">Nenhum item ainda. Inclua OCs nesta lista.</div>';
+
+  const ocsHTML = lista.ocs && lista.ocs.length
+    ? lista.ocs.map(oc => _htmlOCInterna(oc)).join('')
+    : '<div class="oc-sem-itens" style="padding:8px 0;">Nenhuma OC incluída.</div>';
+
+  const nOcs   = lista.ocs ? lista.ocs.length : 0;
+  const nItens = lista.itens_agregados ? lista.itens_agregados.length : 0;
+  const resumo = `${nOcs} OC${nOcs !== 1 ? 's' : ''} · ${nItens} tipo${nItens !== 1 ? 's' : ''} de item`;
+
+  return `<div class="lista-card" data-lista-id="${lista.id}">
+    <div class="lista-card-header">
+      <div class="lista-card-toggle-area" data-lista-id="${lista.id}">
+        <span class="lista-card-chevron${abertaCard ? ' aberto' : ''}">▶</span>
+        <div>
+          <div class="lista-card-nome">${escapeHtml(lista.nome)}</div>
+          <div class="lista-card-data">${dataLabel} &nbsp;·&nbsp; ${resumo}</div>
         </div>
       </div>
-      <div class="oc-itens-wrap">${itensHTML}</div>
-    </div>`;
-  }).join('');
+      <div class="lista-card-actions">
+        <span class="status-pill ${pillCls}" data-pill-lista="${lista.id}">${status}</span>
+        <select class="lista-status-select" data-lista-id="${lista.id}">
+          <option value="pendente"${status==='pendente'?' selected':''}>Pendente</option>
+          <option value="atrasada"${status==='atrasada'?' selected':''}>Atrasada</option>
+          <option value="entregue"${status==='entregue'?' selected':''}>Entregue</option>
+        </select>
+        <button class="btn-incluir-ocs" data-lista-id="${lista.id}">+ Incluir OCs</button>
+        <button class="btn-export-lista" data-lista-id="${lista.id}">↓ Exportar xlsx</button>
+        <button class="btn-excluir-lista" data-lista-id="${lista.id}">Excluir lista</button>
+      </div>
+    </div>
 
-  // Eventos dinâmicos
-  lista.querySelectorAll('.oc-status-select').forEach(sel => {
+    <div class="lista-card-body${abertaCard ? ' aberto' : ''}" id="lista-body-${lista.id}">
+      <div class="lista-secao lista-agregados">
+        <div class="lista-secao-titulo">Itens (agregados)</div>
+        ${agregadosHTML}
+      </div>
+
+      <div class="lista-ocs-wrap">
+        <div class="lista-ocs-header" data-lista-id="${lista.id}">
+          <span class="lista-ocs-toggle${abertaOcs ? ' aberto' : ''}">▶</span>
+          <span>OCs incluídas (${nOcs})</span>
+        </div>
+        <div class="lista-ocs-lista${abertaOcs ? ' aberto' : ''}" id="lista-ocs-${lista.id}">${ocsHTML}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function _vincularEventosListas(container) {
+  // Troca de status: atualiza SÓ a pill daquela lista — sem rebuild do DOM,
+  // o que evita os artefatos visuais e a perda de estado aberto/fechado.
+  container.querySelectorAll('.lista-status-select').forEach(sel => {
     sel.addEventListener('change', () => {
-      backend.atualizar_status_entrega_oc(JSON.stringify({
-        id: parseInt(sel.dataset.ocId), status_entrega: sel.value
-      }), () => {
-        const oc = estado.ocs.find(o => o.id === parseInt(sel.dataset.ocId));
-        if (oc) oc.status_entrega = sel.value;
-        renderLista();
+      const id     = parseInt(sel.dataset.listaId);
+      const status = sel.value;
+      backend.atualizar_status_lista(JSON.stringify({ id, status_entrega: status }), () => {
+        const l = estado.listas.find(x => x.id === id);
+        if (l) l.status_entrega = status;
+        const pill = container.querySelector(`.status-pill[data-pill-lista="${id}"]`);
+        if (pill) {
+          pill.textContent = status;
+          pill.className = `status-pill ${PILL_CLS[status] || 'pendente'}`;
+          pill.setAttribute('data-pill-lista', id);
+        }
         mostrarToast('Status atualizado.');
       });
     });
   });
 
-  lista.querySelectorAll('.btn-export-oc').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const oc = estado.ocs.find(o => o.id === parseInt(btn.dataset.ocId));
-      if (!oc) return;
-      const nome = `OC_${oc.numero || oc.id}_itens.xlsx`;
-      backend.abrir_dialogo_salvar('Salvar planilha', nome, caminho => {
-        if (!caminho) return;
-        backend.exportar_oc_xlsx(oc.id, caminho, raw => {
-          mostrarToast(JSON.parse(raw).ok ? 'Planilha exportada.' : 'Erro ao exportar.', !JSON.parse(raw).ok);
-        });
-      });
+  container.querySelectorAll('.btn-incluir-ocs').forEach(btn => {
+    btn.addEventListener('click', () => abrirIncluirOCsNaLista(parseInt(btn.dataset.listaId)));
+  });
+  container.querySelectorAll('.btn-export-lista').forEach(btn => {
+    btn.addEventListener('click', () => exportarListaXlsx(parseInt(btn.dataset.listaId)));
+  });
+  container.querySelectorAll('.btn-excluir-lista').forEach(btn => {
+    btn.addEventListener('click', () => abrirModalExcluirLista(parseInt(btn.dataset.listaId)));
+  });
+
+  // Toggle do card inteiro — atualiza o Set de estado (persiste entre renders)
+  container.querySelectorAll('.lista-card-toggle-area').forEach(area => {
+    area.addEventListener('click', () => {
+      const id      = parseInt(area.dataset.listaId);
+      const body    = document.getElementById(`lista-body-${id}`);
+      const chevron = area.querySelector('.lista-card-chevron');
+      const aberto  = body.classList.toggle('aberto');
+      chevron.classList.toggle('aberto', aberto);
+      aberto ? estado.listasAbertas.add(id) : estado.listasAbertas.delete(id);
     });
+  });
+
+  // Toggle da sub-lista de OCs
+  container.querySelectorAll('.lista-ocs-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const id   = parseInt(header.dataset.listaId);
+      const body = document.getElementById(`lista-ocs-${id}`);
+      const tog  = header.querySelector('.lista-ocs-toggle');
+      const aberto = body.classList.toggle('aberto');
+      tog.classList.toggle('aberto', aberto);
+      aberto ? estado.ocsAbertas.add(id) : estado.ocsAbertas.delete(id);
+    });
+  });
+
+  // Cliques nos controles de ação não devem abrir/fechar o card
+  container.querySelectorAll('.lista-card-actions button, .lista-card-actions select').forEach(el => {
+    el.addEventListener('click', e => e.stopPropagation());
+    el.addEventListener('change', e => e.stopPropagation());
+  });
+
+  container.querySelectorAll('.btn-excluir-oc').forEach(btn => {
+    btn.addEventListener('click', () => abrirModalExcluirOC(parseInt(btn.dataset.ocId), null));
+  });
+}
+
+function _htmlOCInterna(oc) {
+  const itensHTML = oc.itens && oc.itens.length
+    ? `<table class="oc-itens-inline">
+         <thead><tr><th>Descrição</th><th>UN</th><th>Qtd</th><th>Valor Unit.</th><th>Total</th></tr></thead>
+         <tbody>${oc.itens.map(it => `
+           <tr>
+             <td>${escapeHtml(it.descricao) || '—'}</td>
+             <td>${escapeHtml(it.unidade)}</td>
+             <td>${it.quantidade != null ? it.quantidade : '—'}</td>
+             <td>${fmtBRL(it.valor_unitario)}</td>
+             <td>${fmtBRL(it.valor_total)}</td>
+           </tr>`).join('')}
+         </tbody>
+       </table>`
+    : '<div class="oc-sem-itens">Sem itens.</div>';
+
+  return `<div class="oc-card" style="margin:8px 0;border-left-color:#ececec;">
+    <div class="oc-card-header">
+      <div class="oc-card-info">
+        <div class="oc-num">OC ${escapeHtml(oc.numero) || oc.id}</div>
+        <div class="oc-forn">${escapeHtml(oc.fornecedor) || '—'}</div>
+        <div class="oc-data">${oc.data_entrega_prevista ? 'Entrega: ' + fmtData(oc.data_entrega_prevista) : ''}</div>
+      </div>
+      <div class="oc-card-actions">
+        <button class="btn-excluir-oc" data-oc-id="${oc.id}" title="Excluir OC" style="font-size:11px;">Excluir</button>
+      </div>
+    </div>
+    <div class="oc-itens-wrap">${itensHTML}</div>
+  </div>`;
+}
+
+// ─── CRIAR LISTA ──────────────────────────────────────────────────────────────
+function criarLista() {
+  const data = document.getElementById('nova-lista-data').value || null;
+  backend.criar_lista(JSON.stringify({ data_prevista: data }), raw => {
+    const r = JSON.parse(raw);
+    document.getElementById('modal-nova-lista').style.display = 'none';
+    mostrarToast(`${r.nome} criada.`);
+    recarregarListas(() => abrirIncluirOCsNaLista(r.id));
+  });
+}
+
+function abrirIncluirOCsNaLista(listaId) {
+  const lista = estado.listas.find(l => l.id === listaId);
+  estado.listaAtualId = listaId;
+  document.getElementById('oc-lote-sub').textContent =
+    `Adicionando à lista — ${lista ? lista.nome : ''}`;
+  resetarFormOC();
+  navegarPara('incluir-oc', 'agenda');
+}
+
+// ─── EXPORTAR LISTA ───────────────────────────────────────────────────────────
+function exportarListaXlsx(listaId) {
+  const lista = estado.listas.find(l => l.id === listaId);
+  const nome  = `${lista ? lista.nome.replace(/\s+/g, '_') : 'lista'}_itens.xlsx`;
+  backend.abrir_dialogo_salvar('Salvar planilha da lista', nome, caminho => {
+    if (!caminho) return;
+    backend.exportar_lista_xlsx(listaId, caminho, raw => {
+      mostrarToast(JSON.parse(raw).ok ? 'Planilha exportada.' : 'Erro ao exportar.', !JSON.parse(raw).ok);
+    });
+  });
+}
+
+// ─── EXCLUIR LISTA ────────────────────────────────────────────────────────────
+function abrirModalExcluirLista(listaId) {
+  estado.listaExcluindoId = listaId;
+  const lista = estado.listas.find(l => l.id === listaId);
+  document.getElementById('modal-excluir-lista-titulo').textContent =
+    `Excluir ${lista ? lista.nome : 'lista'}`;
+  document.getElementById('modal-excluir-lista').style.display = 'flex';
+}
+function fecharModalExcluirLista() {
+  document.getElementById('modal-excluir-lista').style.display = 'none';
+  estado.listaExcluindoId = null;
+}
+function confirmarExcluirLista() {
+  const id = estado.listaExcluindoId;
+  if (!id) return;
+  backend.excluir_lista(id, () => {
+    fecharModalExcluirLista();
+    mostrarToast('Lista excluída. OCs movidas para "Sem lista".');
+    recarregarListas();
+  });
+}
+
+// ─── EXCLUSÃO DE OC (individual e em massa) ──────────────────────────────────
+function abrirModalExcluirOC(idUnico, idsMassa) {
+  estado.ocExcluindoId = idUnico;
+  const titulo = document.getElementById('modal-excluir-oc-titulo');
+  const texto  = document.getElementById('modal-excluir-oc-texto');
+  if (idsMassa && idsMassa.length) {
+    titulo.textContent = `Excluir ${idsMassa.length} OC${idsMassa.length > 1 ? 's' : ''}`;
+    texto.textContent  = `Tem certeza que deseja excluir ${idsMassa.length} ordem(ns) de compra selecionada(s)? Os itens serão excluídos junto. Essa ação não pode ser desfeita.`;
+  } else {
+    titulo.textContent = 'Excluir ordem de compra';
+    texto.textContent  = 'Tem certeza que deseja excluir esta ordem de compra? Os itens serão excluídos junto. Essa ação não pode ser desfeita.';
+  }
+  document.getElementById('modal-excluir-oc').style.display = 'flex';
+}
+function fecharModalExcluirOC() {
+  document.getElementById('modal-excluir-oc').style.display = 'none';
+  estado.ocExcluindoId = null;
+}
+function confirmarExcluirOC() {
+  const id = estado.ocExcluindoId;
+  if (id == null) { fecharModalExcluirOC(); return; }
+  backend.excluir_ordem_compra(id, () => {
+    fecharModalExcluirOC();
+    mostrarToast('Ordem de compra excluída.');
+    recarregarListas();
   });
 }
 
@@ -440,6 +791,7 @@ function renderLista() {
 function resetarFormOC() {
   estado.ocFilaLote = [];
   estado.ocFilaIdx  = 0;
+  mostrarLendoOC(false);
   document.getElementById('oc-passo-selecao').style.display      = '';
   document.getElementById('oc-passo-confirmacao').style.display  = 'none';
   document.getElementById('oc-lote-progress').innerHTML          = '';
@@ -462,15 +814,17 @@ function processarProximaOC() {
   const total = estado.ocFilaLote.length;
   if (idx >= total) {
     mostrarToast(`${total} OC${total > 1 ? 's' : ''} salva${total > 1 ? 's' : ''}.`);
-    backend.listar_ordens_compra_com_itens(raw => { estado.ocs = JSON.parse(raw); renderLista(); });
+    recarregarListas();
     navegarPara('agenda', 'agenda');
     return;
   }
 
   document.getElementById('oc-conf-titulo').textContent = `OC ${idx + 1} de ${total}`;
   atualizarProgressoOC();
+  mostrarLendoOC(true);
 
-  backend.ler_pdf_oc(estado.ocFilaLote[idx], raw => {
+  extrairAsync('ler_pdf_oc', estado.ocFilaLote[idx], raw => {
+    mostrarLendoOC(false);
     const d = JSON.parse(raw);
     document.getElementById('oc-numero').value       = d.numero || '';
     document.getElementById('oc-fornecedor').value   = d.fornecedor || '';
@@ -483,7 +837,8 @@ function processarProximaOC() {
     else {
       empty.style.display = 'none';
       tbody.innerHTML = d.itens.map((it, i) => `
-        <tr><td>${i+1}</td><td>${it.descricao||'—'}</td>
+        <tr><td>${i+1}</td><td>${escapeHtml(it.descricao)||'—'}</td>
+        <td>${escapeHtml(it.unidade)||'—'}</td>
         <td>${it.quantidade!=null?it.quantidade:'—'}</td>
         <td>${fmtBRL(it.valor_unitario)}</td><td>${fmtBRL(it.valor_total)}</td></tr>`).join('');
     }
@@ -501,9 +856,10 @@ function salvarOCAtual() {
   const itens = [];
   document.querySelectorAll('#oc-itens-preview tr').forEach(tr => {
     const tds = tr.querySelectorAll('td');
-    if (tds.length >= 5) itens.push({
-      descricao: tds[1].textContent, quantidade: parseBRL(tds[2].textContent),
-      valor_unitario: parseBRL(tds[3].textContent), valor_total: parseBRL(tds[4].textContent),
+    if (tds.length >= 6) itens.push({
+      descricao: tds[1].textContent, unidade: tds[2].textContent === '—' ? '' : tds[2].textContent,
+      quantidade: parseBRL(tds[3].textContent),
+      valor_unitario: parseBRL(tds[4].textContent), valor_total: parseBRL(tds[5].textContent),
     });
   });
   const dados = {
@@ -512,6 +868,7 @@ function salvarOCAtual() {
     data_emissao: document.getElementById('oc-data-emissao').value || null,
     data_entrega_prevista: document.getElementById('oc-data-entrega').value || null,
     arquivo_pdf: estado.ocFilaLote[estado.ocFilaIdx] || '',
+    lista_id: estado.listaAtualId,
     itens,
   };
   backend.salvar_ordem_compra(JSON.stringify(dados), () => { avancarOCLote(); });
@@ -527,7 +884,6 @@ function nfsFiltradas() {
   const f = estado.filtros;
   return estado.nfs.filter(nf => {
     if (f.orgao_id && String(nf.orgao_id) !== String(f.orgao_id)) return false;
-    if (f.categoria && nf.categoria !== f.categoria) return false;
     if (f.status && nf.status_pagamento !== f.status) return false;
     if (f.mes) {
       const [fano, fmes] = f.mes.split('-');
@@ -541,20 +897,57 @@ function nfsFiltradas() {
 
 function aplicarFiltros() {
   estado.filtros.orgao_id  = document.getElementById('filtro-orgao').value;
-  estado.filtros.categoria = document.getElementById('filtro-categoria').value;
   estado.filtros.status    = document.getElementById('filtro-status').value;
   estado.filtros.mes       = document.getElementById('filtro-mes').value;
   estado.selecionadas.clear();
+  atualizarResumoFiltros();
   renderNFs();
 }
 
 function limparFiltros() {
-  ['filtro-orgao','filtro-categoria','filtro-status','filtro-mes'].forEach(id => {
+  ['filtro-orgao','filtro-status','filtro-mes'].forEach(id => {
     document.getElementById(id).value = '';
   });
-  estado.filtros = { orgao_id: '', categoria: '', status: '', mes: '' };
+  estado.filtros = { orgao_id: '', status: '', mes: '' };
   estado.selecionadas.clear();
+  atualizarResumoFiltros();
   renderNFs();
+}
+
+function atualizarResumoFiltros() {
+  const f = estado.filtros;
+  const partes = [];
+  if (f.orgao_id) partes.push(ORGAOS[f.orgao_id] || f.orgao_id);
+  if (f.status) partes.push(f.status === 'pago' ? 'Pagas' : 'Não pagas');
+  if (f.mes) {
+    const [ano, mes] = f.mes.split('-');
+    partes.push(`${MESES[parseInt(mes, 10) - 1]}/${ano}`);
+  }
+  const badge = document.getElementById('filtros-badge');
+  const resumo = document.getElementById('filtros-resumo');
+  const btnLimpar = document.getElementById('btn-limpar-filtros');
+  const btnToggle = document.getElementById('btn-toggle-filtros');
+  if (partes.length > 0) {
+    badge.textContent = partes.length;
+    badge.style.display = 'inline-block';
+    resumo.textContent = partes.join(' · ');
+    btnLimpar.style.display = 'inline-block';
+    btnToggle.classList.add('ativo');
+  } else {
+    badge.style.display = 'none';
+    resumo.textContent = '';
+    btnLimpar.style.display = 'none';
+    btnToggle.classList.remove('ativo');
+  }
+}
+
+// Atualiza só a barra de marcação em massa (visibilidade + contagem). Os totais
+// pago/não-pago não mudam ao (de)selecionar, então alternar seleção não precisa
+// reconstruir o board — ver renderNFs.
+function atualizarBarraMassa() {
+  document.getElementById('massa-bar').style.display = estado.selecionadas.size > 0 ? '' : 'none';
+  document.getElementById('massa-contagem').textContent =
+    `${estado.selecionadas.size} NF${estado.selecionadas.size > 1 ? 's' : ''} selecionada${estado.selecionadas.size > 1 ? 's' : ''}`;
 }
 
 function renderNFs() {
@@ -567,11 +960,7 @@ function renderNFs() {
   document.getElementById('pag-badge').textContent      = naoPagas.length
     ? `${fmtBRL(naoPagas.reduce((s,nf)=>s+(nf.valor||0),0))} a pagar` : 'Tudo pago';
 
-  // Barra de massa
-  const massaBar = document.getElementById('massa-bar');
-  massaBar.style.display = estado.selecionadas.size > 0 ? '' : 'none';
-  document.getElementById('massa-contagem').textContent =
-    `${estado.selecionadas.size} NF${estado.selecionadas.size > 1 ? 's' : ''} selecionada${estado.selecionadas.size > 1 ? 's' : ''}`;
+  atualizarBarraMassa();
 
   const listaNP = document.getElementById('lista-nao-pago');
   const emptyNP = document.getElementById('nao-pago-empty');
@@ -589,12 +978,15 @@ function renderNFs() {
     listaP.innerHTML = pagas.map(nf => cartaoNF(nf, true)).join('');
   }
 
-  // Bind checkboxes
+  // Bind checkboxes — alterna a seleção atualizando SÓ a barra de massa, sem
+  // reconstruir o board. Rebuild do innerHTML a cada clique destruía/recriava
+  // todos os cards (e o próprio checkbox clicado), causando artefatos/flicker
+  // no QWebEngine — mesma classe de bug já corrigida na tela de listas.
   document.querySelectorAll('.nf-checkbox').forEach(cb => {
     cb.addEventListener('change', () => {
       const id = parseInt(cb.dataset.nfId);
       cb.checked ? estado.selecionadas.add(id) : estado.selecionadas.delete(id);
-      renderNFs();
+      atualizarBarraMassa();
     });
   });
 
@@ -608,6 +1000,8 @@ function renderNFs() {
     btn.addEventListener('click', () => abrirModalPagamento(parseInt(btn.dataset.nfId))));
   document.querySelectorAll('.btn-desfazer[data-nf-id]').forEach(btn =>
     btn.addEventListener('click', () => desfazerPagamento(parseInt(btn.dataset.nfId))));
+  document.querySelectorAll('.btn-excluir-nf[data-nf-id]').forEach(btn =>
+    btn.addEventListener('click', () => abrirModalExcluirNF(parseInt(btn.dataset.nfId), null)));
 }
 
 function cartaoNF(nf, paga) {
@@ -625,12 +1019,12 @@ function cartaoNF(nf, paga) {
   return `<div class="nf-card">
     ${checkbox}
     <div class="info nf-card-info" data-nf-id="${nf.id}" style="cursor:pointer;flex:1;">
-      <div class="num">NF ${nf.numero || '—'}</div>
-      <div class="forn">${nf.fornecedor || '—'}</div>
-      ${nf.orgao_nome ? `<div class="orgao-tag">${nf.orgao_nome}${nf.categoria ? ' · ' + nf.categoria : ''}</div>` : ''}
+      <div class="num">NF ${escapeHtml(nf.numero) || '—'}</div>
+      ${nf.orgao_nome ? `<div class="orgao-tag">${escapeHtml(nf.orgao_nome)}${nf.categoria ? ' · ' + escapeHtml(nf.categoria) : ''}</div>` : ''}
     </div>
     <div class="right"><div class="valor">${fmtBRL(nf.valor)}</div>${vencInfo}</div>
     ${btnAcao}
+    <button class="btn-acao btn-excluir-nf" data-nf-id="${nf.id}" title="Excluir NF" style="color:#c90914;background:#fdeceb;">✕</button>
   </div>`;
 }
 
@@ -678,6 +1072,47 @@ function confirmarMassa() {
   });
 }
 
+// ─── EXCLUSÃO DE NF ──────────────────────────────────────────────────────────
+function abrirModalExcluirNF(idUnico, idsMassa) {
+  estado.nfExcluindoId  = idUnico;
+  estado.nfExcluindoIds = idsMassa || [];
+  const n = estado.nfExcluindoIds.length;
+  const massa = n > 1 || (idUnico == null && n > 0);
+  document.getElementById('modal-excluir-nf-titulo').textContent = massa
+    ? `Excluir ${n} nota${n > 1 ? 's' : ''} fiscal${n > 1 ? 'is' : ''}`
+    : 'Excluir nota fiscal';
+  document.getElementById('modal-excluir-nf-texto').textContent = massa
+    ? `Tem certeza que deseja excluir ${n} NFs? Os arquivos PDF copiados também serão removidos. Essa ação não pode ser desfeita.`
+    : 'Tem certeza que deseja excluir esta NF? O arquivo PDF copiado também será removido. Essa ação não pode ser desfeita.';
+  document.getElementById('modal-excluir-nf').style.display = 'flex';
+}
+function fecharModalExcluirNF() {
+  document.getElementById('modal-excluir-nf').style.display = 'none';
+  estado.nfExcluindoId  = null;
+  estado.nfExcluindoIds = [];
+}
+function confirmarExcluirNF() {
+  if (estado.nfExcluindoIds.length > 0) {
+    const ids = estado.nfExcluindoIds;
+    backend.excluir_nfs_em_massa(JSON.stringify({ ids }), raw => {
+      const r = JSON.parse(raw);
+      estado.nfs = estado.nfs.filter(nf => !ids.includes(nf.id));
+      estado.selecionadas.clear();
+      fecharModalExcluirNF();
+      renderNFs(); renderDashboard();
+      mostrarToast(`${r.excluidas} NF${r.excluidas > 1 ? 's' : ''} excluída${r.excluidas > 1 ? 's' : ''}.`);
+    });
+  } else if (estado.nfExcluindoId != null) {
+    const id = estado.nfExcluindoId;
+    backend.excluir_nf(id, () => {
+      estado.nfs = estado.nfs.filter(nf => nf.id !== id);
+      fecharModalExcluirNF();
+      renderNFs(); renderDashboard();
+      mostrarToast('NF excluída.');
+    });
+  }
+}
+
 // ─── DETALHE NF ───────────────────────────────────────────────────────────────
 function abrirDetalheNF(id, viewOrigem) {
   const nf = estado.nfs.find(n => n.id === id);
@@ -686,14 +1121,13 @@ function abrirDetalheNF(id, viewOrigem) {
   estado.viewAnteriorNF = viewOrigem || 'pagamentos';
 
   document.getElementById('nf-det-titulo').textContent = `NF ${nf.numero || '—'}`;
-  document.getElementById('nf-det-sub').textContent    = nf.fornecedor || '—';
+  document.getElementById('nf-det-sub').textContent    = nf.orgao_nome || '—';
 
   const btnPago = document.getElementById('btn-marcar-pago-det');
   btnPago.style.display = nf.status_pagamento === 'pago' ? 'none' : '';
 
   document.getElementById('nf-det-info').innerHTML = `
-    <tr><td style="color:#999;font-size:11px;width:120px;">Número</td><td>${nf.numero || '—'}</td></tr>
-    <tr><td style="color:#999;font-size:11px;">Fornecedor</td><td>${nf.fornecedor || '—'}</td></tr>
+    <tr><td style="color:#999;font-size:11px;width:120px;">Número</td><td>${escapeHtml(nf.numero) || '—'}</td></tr>
     <tr><td style="color:#999;font-size:11px;">Emissão</td><td>${fmtData(nf.data_emissao)}</td></tr>
     <tr><td style="color:#999;font-size:11px;">Valor</td><td><strong>${fmtBRL(nf.valor)}</strong></td></tr>
     <tr><td style="color:#999;font-size:11px;">Vencimento</td><td>${fmtData(nf.data_vencimento)}</td></tr>
@@ -701,10 +1135,10 @@ function abrirDetalheNF(id, viewOrigem) {
     <tr><td style="color:#999;font-size:11px;">Status</td><td><span class="status-pill ${nf.status_pagamento === 'pago' ? 'pago' : 'nao-pago'}">${nf.status_pagamento === 'pago' ? 'pago' : 'não pago'}</span></td></tr>`;
 
   document.getElementById('nf-det-extra').innerHTML = `
-    <tr><td style="color:#999;font-size:11px;width:120px;">Órgão</td><td>${nf.orgao_nome || '—'}</td></tr>
-    <tr><td style="color:#999;font-size:11px;">Categoria</td><td>${nf.categoria || '—'}</td></tr>
-    <tr><td style="color:#999;font-size:11px;">Origem</td><td>${nf.origem || '—'}</td></tr>
-    <tr><td style="color:#999;font-size:11px;">Incluída em</td><td>${nf.criado_em ? nf.criado_em.slice(0, 16) : '—'}</td></tr>`;
+    <tr><td style="color:#999;font-size:11px;width:120px;">Órgão</td><td>${escapeHtml(nf.orgao_nome) || '—'}</td></tr>
+    <tr><td style="color:#999;font-size:11px;">Categoria</td><td>${escapeHtml(nf.categoria) || '—'}</td></tr>
+    <tr><td style="color:#999;font-size:11px;">Origem</td><td>${escapeHtml(nf.origem) || '—'}</td></tr>
+    <tr><td style="color:#999;font-size:11px;">Incluída em</td><td>${nf.criado_em ? escapeHtml(nf.criado_em.slice(0, 16)) : '—'}</td></tr>`;
 
   backend.listar_itens_nf(id, raw => {
     const itens = JSON.parse(raw);
@@ -715,10 +1149,10 @@ function abrirDetalheNF(id, viewOrigem) {
       empty.style.display = 'none';
       tbody.innerHTML = itens.map((it, i) => `
         <tr>
-          <td>${i+1}</td><td>${it.descricao||'—'}</td>
+          <td>${i+1}</td><td>${escapeHtml(it.descricao)||'—'}</td>
           <td>${it.quantidade!=null?it.quantidade:'—'}</td>
           <td>${fmtBRL(it.valor_unitario)}</td><td>${fmtBRL(it.valor_total)}</td>
-          <td>${it.ncm||'—'}</td><td>${it.cfop||'—'}</td>
+          <td>${escapeHtml(it.ncm)||'—'}</td><td>${escapeHtml(it.cfop)||'—'}</td>
         </tr>`).join('');
     }
   });
@@ -734,18 +1168,19 @@ function resetarFormNF() {
   estado.nfFilaLote    = [];
   estado.nfFilaIdx     = 0;
 
+  mostrarLendoNF(false);
   document.querySelectorAll('.modo-tab').forEach(t => t.classList.toggle('active', t.dataset.modo === 'pdf'));
   document.getElementById('nf-sec-arquivo').style.display  = '';
   document.getElementById('nf-form-dados').style.display   = 'none';
-  document.getElementById('nf-sec-itens').style.display    = 'none';
   document.getElementById('nf-lote-progress').style.display = 'none';
   document.getElementById('nf-upload-icon').textContent    = 'PDF';
   document.getElementById('nf-upload-texto').textContent   = 'Clique para selecionar um ou mais arquivos';
   document.getElementById('btn-pular-nf').style.display    = 'none';
+  document.getElementById('nf-modo-wrap').style.display    = '';
 
-  ['nf-numero','nf-fornecedor','nf-data-emissao','nf-valor',
+  ['nf-numero','nf-data-emissao','nf-valor',
    'nf-data-vencimento','nf-data-pagamento'].forEach(id => document.getElementById(id).value = '');
-  document.querySelectorAll('#nf-orgao-tags .tag, #nf-categoria-tags .tag').forEach(t => t.classList.remove('selected'));
+  document.querySelectorAll('#nf-orgao-tags .tag').forEach(t => t.classList.remove('selected'));
   document.getElementById('toggle-nao-pago').classList.add('checked');
   document.getElementById('toggle-pago').classList.remove('checked');
   document.getElementById('field-data-pagamento').style.display = 'none';
@@ -759,10 +1194,7 @@ function mudarModoNF(modo) {
 
   document.getElementById('nf-form-dados').style.display   = modo === 'manual' ? '' : 'none';
   document.getElementById('nf-sec-arquivo').style.display  = modo !== 'manual' ? '' : 'none';
-  document.getElementById('nf-sec-itens').style.display    = modo === 'manual' ? '' : 'none';
-  document.getElementById('btn-add-item-nf').style.display = modo === 'manual' ? '' : 'none';
-  document.getElementById('nf-itens-tabela').innerHTML     = '';
-  document.getElementById('nf-itens-empty').style.display  = modo === 'manual' ? '' : 'none';
+  document.getElementById('nf-modo-wrap').style.display    = '';
   document.getElementById('btn-pular-nf').style.display    = 'none';
   document.getElementById('nf-lote-progress').style.display = 'none';
 
@@ -776,7 +1208,7 @@ function mudarModoNF(modo) {
     document.getElementById('nf-upload-hint').textContent  = 'Múltipla seleção permitida';
   }
   if (modo === 'manual') {
-    ['nf-numero','nf-fornecedor','nf-data-emissao','nf-valor'].forEach(id => {
+    ['nf-numero','nf-data-emissao','nf-valor'].forEach(id => {
       document.getElementById(id).value = '';
     });
   }
@@ -817,10 +1249,11 @@ function atualizarProgressoNF() {
   el.innerHTML = estado.nfFilaLote.map((_, i) => `
     <span class="prog-dot ${i < estado.nfFilaIdx ? 'done' : i === estado.nfFilaIdx ? 'atual' : ''}"></span>
   `).join('');
-  if (estado.nfFilaLote.length > 1) {
-    document.getElementById('nf-conf-titulo').textContent =
-      `NF ${estado.nfFilaIdx + 1} de ${estado.nfFilaLote.length}`;
-  }
+  // Título sempre no padrão "NF X de N" (igual à confirmação de OC), mesmo
+  // para um único arquivo — reforça que esta é uma tela de confirmação,
+  // não a de inclusão manual.
+  document.getElementById('nf-conf-titulo').textContent =
+    `NF ${estado.nfFilaIdx + 1} de ${estado.nfFilaLote.length}`;
 }
 
 function processarProximaNF() {
@@ -839,36 +1272,42 @@ function processarProximaNF() {
   estado.nfFormCaminho  = caminho;
   estado.nfFormItens    = [];
 
-  const extrator = modo === 'xml'
-    ? (cb => backend.ler_xml_nf(caminho, cb))
-    : (cb => backend.ler_pdf_nf(caminho, cb));
+  const metodo = modo === 'xml' ? 'ler_xml_nf' : 'ler_pdf_nf';
+  mostrarLendoNF(true);
 
-  extrator(raw => {
+  extrairAsync(metodo, caminho, raw => {
+    mostrarLendoNF(false);
     const d = JSON.parse(raw);
     if (d._erro) { mostrarToast(`Erro: ${d._erro}`, true); avancarNFLote(); return; }
     document.getElementById('nf-numero').value       = d.numero || '';
-    document.getElementById('nf-fornecedor').value   = d.fornecedor || '';
+
     document.getElementById('nf-data-emissao').value = d.data_emissao || '';
     if (d.valor != null) document.getElementById('nf-valor').value =
       Number(d.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
 
-    if (modo === 'xml' && d.itens && d.itens.length) {
-      estado.nfFormItens = d.itens;
-      renderItensNFForm(false);
-      document.getElementById('nf-sec-itens').style.display  = '';
-      document.getElementById('nf-itens-label').textContent  = 'Itens extraídos do XML';
+    // Detecção automática do órgão (CLAUDE.md seção 6.3) — pré-seleciona a
+    // tag sem exigir confirmação manual; usuário pode trocar antes de salvar.
+    document.querySelectorAll('#nf-orgao-tags .tag').forEach(t => t.classList.remove('selected'));
+    if (d.orgao_id) {
+      const tagOrgao = document.querySelector(`#nf-orgao-tags .tag[data-val="${d.orgao_id}"]`);
+      if (tagOrgao) tagOrgao.classList.add('selected');
     }
+
+    // Coleta de itens desativada por decisão de produto (2026-06-29).
+    // nfFormItens permanece vazio; salvarNFAtual envia itens: [].
     document.getElementById('nf-sec-arquivo').style.display = 'none';
     document.getElementById('nf-form-dados').style.display  = '';
+    // Some as abas de modo (PDF/XML/Manual) na confirmação — a tela passa a
+    // se parecer com a confirmação da OC, não com a inclusão manual.
+    document.getElementById('nf-modo-wrap').style.display    = 'none';
   });
 }
 
 function avancarNFLote() {
   estado.nfFilaIdx++;
   // Reseta campos para o próximo arquivo
-  ['nf-numero','nf-fornecedor','nf-data-emissao','nf-valor'].forEach(id => document.getElementById(id).value = '');
+  ['nf-numero','nf-data-emissao','nf-valor'].forEach(id => document.getElementById(id).value = '');
   estado.nfFormItens = [];
-  document.getElementById('nf-sec-itens').style.display = 'none';
   document.getElementById('nf-form-dados').style.display = estado.nfFilaIdx < estado.nfFilaLote.length ? '' : 'none';
   processarProximaNF();
 }
@@ -881,11 +1320,11 @@ function renderItensNFForm(editavel) {
   tbody.innerHTML = estado.nfFormItens.map((it, i) => `
     <tr>
       <td>${i+1}</td>
-      <td>${editavel ? `<input type="text" value="${it.descricao||''}" style="width:100%;" oninput="estado.nfFormItens[${i}].descricao=this.value" />` : (it.descricao||'—')}</td>
+      <td>${editavel ? `<input type="text" value="${escapeHtml(it.descricao)}" style="width:100%;" oninput="estado.nfFormItens[${i}].descricao=this.value" />` : (escapeHtml(it.descricao)||'—')}</td>
       <td>${editavel ? `<input type="number" value="${it.quantidade||''}" style="width:70px;" oninput="estado.nfFormItens[${i}].quantidade=parseFloat(this.value)||null" />` : (it.quantidade!=null?it.quantidade:'—')}</td>
       <td>${editavel ? `<input type="text" value="${it.valor_unitario!=null?it.valor_unitario:''}" style="width:80px;" oninput="estado.nfFormItens[${i}].valor_unitario=parseBRL(this.value)" />` : fmtBRL(it.valor_unitario)}</td>
       <td>${editavel ? `<input type="text" value="${it.valor_total!=null?it.valor_total:''}" style="width:80px;" oninput="estado.nfFormItens[${i}].valor_total=parseBRL(this.value)" />` : fmtBRL(it.valor_total)}</td>
-      <td>${it.ncm||''}</td>
+      <td>${escapeHtml(it.ncm)}</td>
       <td>${editavel ? `<button class="btn-remover-item" onclick="removerItemNF(${i})">✕</button>` : ''}</td>
     </tr>`).join('');
 }
@@ -902,22 +1341,22 @@ function removerItemNF(idx) {
 function salvarNFAtual() {
   const statusPago = document.getElementById('toggle-pago').classList.contains('checked');
   const orgaoTag   = document.querySelector('#nf-orgao-tags .tag.selected');
-  const catTag     = document.querySelector('#nf-categoria-tags .tag.selected');
   const modo       = estado.nfFormModo;
 
   const dados = {
     numero:          document.getElementById('nf-numero').value.trim() || null,
-    fornecedor:      document.getElementById('nf-fornecedor').value.trim() || null,
     data_emissao:    document.getElementById('nf-data-emissao').value || null,
     valor:           parseBRL(document.getElementById('nf-valor').value),
     orgao_id:        orgaoTag ? parseInt(orgaoTag.dataset.val) : null,
-    categoria:       catTag ? catTag.dataset.val : null,
+    // categoria desativada por decisão de produto (2026-06-29)
+    categoria:       null,
     status_pagamento:statusPago ? 'pago' : 'nao_pago',
     data_vencimento: document.getElementById('nf-data-vencimento').value || null,
     data_pagamento:  statusPago ? (document.getElementById('nf-data-pagamento').value || isoHoje()) : null,
     arquivo_pdf:     modo === 'pdf' ? (estado.nfFormCaminho || '') : '',
     origem:          modo,
-    itens:           (modo === 'xml' || modo === 'manual') ? estado.nfFormItens : [],
+    // itens desativados por decisão de produto (2026-06-29)
+    itens:           [],
   };
 
   if (!dados.valor) { mostrarToast('Informe o valor da NF.', true); return; }

@@ -21,6 +21,7 @@ Contexto de produto, problema e escopo: ver [IDEA.md](IDEA.md).
 11. [Limitações Conhecidas](#11-limitações-conhecidas)
 12. [Armazenamento e Configuração de Pastas](#12-armazenamento-e-configuração-de-pastas)
 13. [Versionamento (CHANGELOG)](#13-versionamento-changelog)
+14. [Distribuição e Atualizações](#14-distribuição-e-atualizações)
 
 ---
 
@@ -46,7 +47,9 @@ Contexto de produto, problema e escopo: ver [IDEA.md](IDEA.md).
 | Tecnologia | Função |
 |---|---|
 | **pdfplumber** | Extração de texto e tabelas de PDFs com layout previsível (NFs, OCs) |
-| **PyMuPDF (fitz)** | Suporte/fallback para extração de texto quando `pdfplumber` não resolver bem o layout |
+| **PyMuPDF (fitz)** | Suporte/fallback para extração de texto quando `pdfplumber` não resolver bem o layout; também usado para rasterizar páginas (`get_pixmap`) no fallback de OCR |
+| **pytesseract** | Fallback de OCR para NF em PDF quando a camada de texto do PDF estiver corrompida (encoding de fonte quebrado — comum em DANFEs gerados por alguns emissores). Requer o binário do Tesseract instalado no sistema (não é instalável via `pip`) |
+| **Pillow (PIL)** | Conversão da página rasterizada (PyMuPDF) para imagem em memória antes de passar ao `pytesseract` |
 | **xml.etree.ElementTree** (biblioteca padrão) | Parsing do XML padronizado da NFe (leiaute nacional SEFAZ) para importação de NF com itens, sem depender de heurística de layout de PDF |
 
 ### Persistência e exportação
@@ -243,7 +246,7 @@ Só é populada quando a NF é incluída via XML ou via entrada manual com itens
 - Botão **"Incluir NF"** abre a tela de inclusão (seção 6.4), agora também com **inclusão em lote**: upload de múltiplos arquivos (PDF e/ou XML) de uma vez, cada um extraído e exibido para confirmação antes de salvar.
 - **Filtros** sobre a lista/board (por órgão, categoria, status de pagamento, período).
 - **Marcação em massa como paga**: seleção de várias NFs (ex.: via checkbox nos cards) e ação única para marcar todas como pagas, preenchendo a data de pagamento.
-- Detecção automática de órgão a partir de dados da NF (ex.: cadastro do fornecedor/destinatário) é uma automação **planejada, ainda sem desenho definido** — quando implementada, está autorizada a pré-selecionar o órgão **sem exigir confirmação manual**, como exceção pontual à regra geral da seção 10 (toda extração automática passa por conferência antes de salvar). Decisão de produto já registrada; lógica de detecção fica para conversa futura.
+- **Detecção automática de órgão** a partir do destinatário/remetente da NF — implementada via busca de palavra-chave no texto extraído (`destinatario`, vindo do PDF ou do `<dest><xNome>` do XML): "SAÚDE" → Saúde, "EDUCAÇÃO"/"EDUCACIONAL" → Educação, "ASSISTÊNCIA SOCIAL" → Assistência Social, "PREFEITURA"/"ADMINISTRAÇÃO"/"MUNICÍPIO"/"MUNICIPAL" → Administração (fallback genérico, só usado quando nenhuma palavra-chave mais específica é encontrada — ex.: "SECRETARIA MUNICIPAL DE SAÚDE" resolve para Saúde, não Administração). Implementado em `app/extracao/orgao.py` (`detectar_orgao`), chamado por `app/extracao/nf.py` e `app/extracao/nf_xml.py`. A tela "Incluir NF" pré-seleciona a tag do órgão detectado **sem exigir confirmação manual**, como exceção pontual à regra geral da seção 10 (toda extração automática passa por conferência antes de salvar) — usuário pode trocar a seleção livremente antes de salvar.
 
 ### 6.4 Incluir NF
 
@@ -294,6 +297,7 @@ Para marcar várias notas como pagas de uma vez, use os filtros para localizá-l
 
 - Python 3.11+
 - pip
+- **Tesseract OCR** instalado no sistema (binário externo, não vem pelo `pip`) — usado pelo `pytesseract` no fallback de OCR da extração de NF (seção 11). No Windows, instalar o pacote do Tesseract (ex.: build do UB-Mannheim) e garantir que o executável esteja no `PATH`, ou apontar `pytesseract.pytesseract.tesseract_cmd` para o caminho do binário.
 
 ### Instalação
 
@@ -317,14 +321,45 @@ Isso abre a janela PySide6 com o `QWebEngineView` carregando `app/ui/index.html`
 
 ## 9. Build e Distribuição
 
-```bash
-pyinstaller --noconfirm --windowed --name TrigoBom app/main.py
+O fluxo completo é executado pelo script **`build.ps1`**, na raiz de `trigo_bom/`:
+
+```powershell
+# Build completo (PyInstaller + instalador Inno Setup):
+.\build.ps1
+
+# Só PyInstaller, sem gerar o .exe do instalador:
+.\build.ps1 -SemInstalador
 ```
 
-**Saída em `dist/TrigoBom/`:**
-- Executável único para Windows, sem exigir Python instalado na máquina do cliente.
+O script:
+1. Lê a versão de `app/__version__.py` (fonte única de verdade — seção 14.1).
+2. Roda o PyInstaller com as flags abaixo e renomeia a saída para `dist/TrigoBom-<versão>/`.
+3. Chama `iscc.exe` passando a versão e o caminho do dist, gerando `dist/TrigoBomSetup-<versão>.exe`.
 
-> A definição final de ícone, arquivos adicionais (`--add-data`) e geração de instalador (ex.: Inno Setup/NSIS) fica para quando o projeto entrar na fase de empacotamento.
+**Flags do PyInstaller** (gerenciadas pelo `build.ps1`):
+```
+--noconfirm --windowed --onedir
+--icon     app\ui\assets\icone.ico
+--name     TrigoBom
+--paths    app
+--add-data "app\ui:ui"
+--add-data "app\db\schema.sql:db"
+--hidden-import pytesseract
+--hidden-import PIL.Image
+--collect-all fitz
+app\main.py
+```
+
+**Pré-requisitos do build:**
+- `.venv` com `pip install -r requirements.txt` (o `build.ps1` instala o PyInstaller no venv automaticamente se faltar)
+- Inno Setup 6 instalado (padrão em `C:\Program Files (x86)\Inno Setup 6\iscc.exe`) para gerar o instalador
+- `installer/vendor/tesseract-setup.exe` presente para incluir o Tesseract no instalador (ver seção 14.3)
+
+**Saída:**
+- `dist/TrigoBom-<versão>/` — pasta com o executável e recursos (`--onedir`, não `--onefile` — ver justificativa na seção 14.2)
+- `dist/TrigoBomSetup-<versão>.exe` — instalador final para entregar ao cliente
+
+> O fluxo completo de empacotamento (instalador, dependência do Tesseract, versionamento e como as atualizações chegam ao cliente) está definido na [seção 14](#14-distribuição-e-atualizações).
 
 ---
 
@@ -340,7 +375,9 @@ pyinstaller --noconfirm --windowed --name TrigoBom app/main.py
 
 | Limitação | Detalhes |
 |---|---|
-| **Extração depende do layout do PDF** | `pdfplumber`/`PyMuPDF` extraem bem PDFs com texto selecionável e layout consistente; PDFs escaneados como imagem (sem OCR) não são suportados no momento |
+| **Extração depende do layout do PDF** | `pdfplumber`/`PyMuPDF` extraem bem PDFs com texto selecionável e layout consistente |
+| **Fallback de OCR para camada de texto corrompida** | Alguns DANFEs (notadamente de certos emissores) têm a camada de texto do PDF com encoding de fonte quebrado — `pdfplumber`/`PyMuPDF` retornam texto vazio ou ilegível. Nesses casos, `app/extracao/nf.py` detecta a corrupção (ausência das frases-padrão de um DANFE legível) e cai para OCR: rasteriza as páginas via PyMuPDF (`get_pixmap`, 300 DPI) e roda `pytesseract` (idioma `por`, com fallback para `eng`). Texto OCR tem maior taxa de erro em campos sobrepostos a logos/imagens (ex.: nome do emitente na seção "IDENTIFICAÇÃO DO EMITENTE" às vezes fica vazio) — por isso o fornecedor e o valor têm fallback adicional via o canhoto de recebimento ("RECEBEMOS DE ...", "VALOR TOTAL: R$ ..."), mais robusto a OCR do que as seções formais do DANFE. Depende do binário do Tesseract instalado no sistema (seção 8) — sem ele, a extração apenas retorna os campos vazios para conferência manual, sem quebrar |
+| **PDFs escaneados como imagem pura** | Quando o PDF é uma imagem sem nenhuma camada de texto (nem corrompida), o fluxo de OCR ainda se aplica (mesmo critério de "texto vazio" aciona o fallback), mas a qualidade depende da resolução/nitidez da digitalização |
 | **Importação de XML cobre só NFe modelo 55** | O leiaute nacional padronizado é o da NFe (produtos). NFS-e (notas de serviço municipais) tem leiaute próprio por município e não é lida pelo parser de XML — essas notas continuam só por PDF ou entrada manual |
 | **Sem autenticação** | Não há controle de acesso ou perfis de usuário — qualquer pessoa com acesso ao computador tem acesso total |
 | **Sem escrita simultânea real entre dispositivos** | O modelo de multi-dispositivo (seção 12) é "alternado com aviso de lock", não sincronização em tempo real. Se dois dispositivos editarem ao mesmo tempo ignorando o aviso de lock, o backup mais recente sobrescreve o outro sem mesclar — risco de perda de dados aceito por decisão de produto, dado que não há servidor |
@@ -421,3 +458,40 @@ Regras:
 - Liste os arquivos afetados.
 - Nunca edite entradas antigas — apenas adicione novas no topo.
 - Se a conversa não resultou em nenhuma mudança de arquivo (só discussão/planejamento), não criar entrada.
+
+---
+
+## 14. Distribuição e Atualizações
+
+> **Contexto:** cliente único hoje, baixo volume de releases, sem orçamento/necessidade de infraestrutura de servidor (mesma lógica da seção 12.1). As decisões abaixo priorizam simplicidade operacional sobre automação completa.
+
+### 14.1 Versionamento
+
+- O projeto usa **semver** (`MAJOR.MINOR.PATCH`).
+- A versão vive em **um único lugar**: `app/__version__.py`, na constante `__version__`. É essa constante que a UI (ex.: tela "Sobre") e o script de build leem — nunca duplicar o número em outro arquivo.
+- Cada versão entregue ao cliente corresponde a uma **tag git** (`vX.Y.Z`) e a uma entrada do `CHANGELOG.md` (seção 13). A tag marca o commit exato que foi empacotado.
+
+### 14.2 Build (PyInstaller)
+
+- Usar **`--onedir`**, não `--onefile`. O onefile se autoextrai numa pasta temporária a cada abertura — mais lento (perceptível com Qt/Chromium embutido) e mais propenso a falso positivo de antivírus, já que "executável que extrai e roda outro código" é a assinatura típica de um dropper. O onedir abre direto e levanta menos suspeita; o instalador (seção 14.3) cuida de esconder a pasta do cliente atrás de um atalho.
+- `requirements.txt` deve manter **versões fixas** (`==`, não `>=`) a partir de agora, para que o build seja reprodutível — um rebuild futuro não deve trazer uma versão de lib diferente da que foi testada.
+
+### 14.3 Empacotamento (Inno Setup)
+
+- A pasta gerada pelo PyInstaller é embrulhada num instalador único (`TrigoBomSetup-X.Y.Z.exe`) com **Inno Setup** (gratuito, scriptável).
+- O instalador **preserva `%APPDATA%\TrigoBom`** entre versões — nunca apaga `trigo_bom.db` ou `config.json` do cliente numa atualização.
+- **Tesseract OCR encadeado:** o instalador inclui o instalador oficial do Tesseract (build UB-Mannheim) como arquivo extra e o dispara silenciosamente durante a instalação — mas **só se o Tesseract ainda não estiver presente** na máquina (checar `tesseract.exe` no `PATH`/caminho padrão antes de rodar o setup encadeado), para não forçar reinstalação a cada atualização do TrigoBom.
+- **Sem assinatura de código** por enquanto — o aviso do Windows SmartScreen ("aplicativo desconhecido") é aceito como custo operacional dado o cliente único. Reavaliar se o app passar a ser distribuído para mais clientes.
+
+### 14.4 Distribuição (GitHub Releases)
+
+- Cada versão é publicada como uma **Release** no repositório (privado), com a tag `vX.Y.Z` e o instalador anexado como asset.
+- Como o repositório é privado, o cliente não acessa a página de Release diretamente — a entrega ao cliente continua **manual** (link do asset ou arquivo enviado por e-mail/Drive).
+- Vantagem de usar Releases mesmo com entrega manual: histórico de versões centralizado, sem precisar gerenciar uma pasta de "versões antigas" à parte.
+
+### 14.5 Atualizações
+
+Duas fases, para não construir automação que o projeto não precisa ainda:
+
+1. **Fase atual (manual):** você builda, publica a Release, envia o link/instalador ao cliente. Ele instala por cima da versão anterior (o Inno Setup faz upgrade in-place, preservando os dados — seção 14.3). Sem código extra, sem risco de auto-update quebrar algo num app que controla dinheiro.
+2. **Fase futura (notificação, não auto-update):** se o cliente passar a reclamar de não saber que há versão nova, adicionar uma checagem leve no `main.py` — ao abrir, consulta a API do GitHub pela release mais recente, compara com `app.__version__.__version__`, e mostra um banner discreto "Nova versão disponível" com link de download. **Sem download/instalação silenciosa automática** — evita precisar de certificado de assinatura e o risco de uma atualização forçada travar o app no meio do expediente do cliente.

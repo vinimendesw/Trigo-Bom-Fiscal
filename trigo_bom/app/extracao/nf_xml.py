@@ -7,6 +7,8 @@ Namespace: http://www.portalfiscal.inf.br/nfe
 import json
 import xml.etree.ElementTree as ET
 
+from extracao.orgao import detectar_orgao
+
 NS = "http://www.portalfiscal.inf.br/nfe"
 _NS = f"{{{NS}}}"
 
@@ -37,6 +39,8 @@ def extrair_nf_xml(caminho: str) -> str:
         "data_emissao": "",
         "valor": None,
         "itens": [],
+        "destinatario": "",
+        "orgao_id": None,
         "arquivo_xml": caminho,
     }
 
@@ -69,6 +73,12 @@ def extrair_nf_xml(caminho: str) -> str:
         resultado["numero"]      = _txt(ide, "nNF") if ide is not None else ""
         resultado["fornecedor"]  = _txt(emit, "xNome") if emit is not None else ""
         resultado["data_emissao"]= _formatar_data(_txt(ide, "dhEmi") if ide is not None else "")
+
+        # Destinatário (o órgão a quem a NF foi emitida) + detecção automática
+        # do órgão por palavra-chave (CLAUDE.md seção 6.3).
+        dest = inf.find(_tag("dest"))
+        resultado["destinatario"] = _txt(dest, "xNome") if dest is not None else ""
+        resultado["orgao_id"] = detectar_orgao(resultado["destinatario"])
 
         total   = inf.find(_tag("total"))
         icms    = total.find(_tag("ICMSTot")) if total is not None else None

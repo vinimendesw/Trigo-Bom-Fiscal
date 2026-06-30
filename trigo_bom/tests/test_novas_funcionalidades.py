@@ -123,9 +123,15 @@ def test_totais_por_orgao_zero_sem_nfs(db_isolado):
 
 
 def test_totais_por_orgao_soma_correta(db_isolado):
-    repo.salvar_nf(_nf(orgao_id=1, valor=200.0, data="2026-06-10"))
-    repo.salvar_nf(_nf(orgao_id=1, valor=300.0, data="2026-06-15"))
-    repo.salvar_nf(_nf(orgao_id=2, valor=150.0, data="2026-06-20"))
+    # totais_nf_por_orgao agrupa por data_pagamento (NFs pagas)
+    def _paga(orgao_id, valor, data_pag):
+        return json.dumps({
+            "orgao_id": orgao_id, "valor": valor,
+            "status_pagamento": "pago", "data_pagamento": data_pag,
+        })
+    repo.salvar_nf(_paga(1, 200.0, "2026-06-10"))
+    repo.salvar_nf(_paga(1, 300.0, "2026-06-15"))
+    repo.salvar_nf(_paga(2, 150.0, "2026-06-20"))
     r = json.loads(repo.totais_nf_por_orgao(6, 2026))
     por_id = {row["orgao_id"]: row["total"] for row in r}
     assert por_id[1] == pytest.approx(500.0)
@@ -134,8 +140,15 @@ def test_totais_por_orgao_soma_correta(db_isolado):
 
 
 def test_totais_por_orgao_filtra_por_mes(db_isolado):
-    repo.salvar_nf(_nf(orgao_id=1, valor=100.0, data="2026-06-10"))
-    repo.salvar_nf(_nf(orgao_id=1, valor=999.0, data="2026-05-10"))  # mês errado
+    # Só NFs pagas com data_pagamento no mês alvo devem entrar
+    repo.salvar_nf(json.dumps({
+        "orgao_id": 1, "valor": 100.0,
+        "status_pagamento": "pago", "data_pagamento": "2026-06-10",
+    }))
+    repo.salvar_nf(json.dumps({
+        "orgao_id": 1, "valor": 999.0,
+        "status_pagamento": "pago", "data_pagamento": "2026-05-10",  # mês errado
+    }))
     r = json.loads(repo.totais_nf_por_orgao(6, 2026))
     por_id = {row["orgao_id"]: row["total"] for row in r}
     assert por_id[1] == pytest.approx(100.0)

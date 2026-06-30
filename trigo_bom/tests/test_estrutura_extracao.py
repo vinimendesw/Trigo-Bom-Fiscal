@@ -7,11 +7,11 @@ O frontend nunca deve receber KeyError ou JSON malformado.
 import json
 import pytest
 
-from extracao.nf import extrair_nf
+from extracao.nf import extrair_nf, _extrair_numero
 from extracao.ordem_compra import extrair_ordem_compra
 
 
-CHAVES_NF = {"numero", "fornecedor", "data_emissao", "valor", "arquivo_pdf"}
+CHAVES_NF = {"numero", "fornecedor", "data_emissao", "valor", "destinatario", "orgao_id", "arquivo_pdf"}
 CHAVES_OC = {"numero", "fornecedor", "data_emissao", "data_entrega_prevista", "itens", "arquivo_pdf"}
 
 
@@ -71,3 +71,17 @@ def test_extracao_oc_pdf_inexistente_tem_chaves(tmp_path):
     r = json.loads(extrair_ordem_compra("/nao/existe.pdf"))
     assert CHAVES_OC.issubset(r.keys())
     assert "_erro" in r
+
+
+# ── Número da NF: preserva zeros à esquerda, vazio não vira "0" ───────────────
+
+def test_extrair_numero_preserva_zeros_a_esquerda():
+    assert _extrair_numero("Número da nota: 000452") == "000452"
+
+
+def test_extrair_numero_remove_separadores_de_milhar():
+    assert _extrair_numero("Nº 12.345") == "12345"
+
+
+def test_extrair_numero_vazio_nao_vira_zero():
+    assert _extrair_numero("texto sem identificacao de nota") == ""

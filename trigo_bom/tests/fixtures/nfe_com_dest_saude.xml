@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<NFe xmlns="http://www.portalfiscal.inf.br/nfe">
+  <infNFe Id="NFe43260601234567000100550010000004531000004531" versao="4.00">
+    <ide>
+      <cUF>43</cUF>
+      <natOp>VENDA</natOp>
+      <mod>55</mod>
+      <serie>1</serie>
+      <nNF>453</nNF>
+      <dhEmi>2026-06-21T09:00:00-03:00</dhEmi>
+    </ide>
+    <emit>
+      <CNPJ>01234567000100</CNPJ>
+      <xNome>Distribuidora Central Ltda</xNome>
+    </emit>
+    <dest>
+      <CNPJ>02506012000118</CNPJ>
+      <xNome>SECRETARIA MUNICIPAL DE SAUDE DE GOIANAPOLIS</xNome>
+    </dest>
+    <det nItem="1">
+      <prod>
+        <cProd>003</cProd>
+        <xProd>Luvas descartáveis cx 100</xProd>
+        <NCM>40151900</NCM>
+        <CFOP>5102</CFOP>
+        <uCom>CX</uCom>
+        <qCom>5.0000</qCom>
+        <vUnCom>30.0000000000</vUnCom>
+        <vProd>150.00</vProd>
+      </prod>
+    </det>
+    <total>
+      <ICMSTot>
+        <vBC>0.00</vBC>
+        <vICMS>0.00</vICMS>
+        <vProd>150.00</vProd>
+        <vNF>150.00</vNF>
+      </ICMSTot>
+    </total>
+  </infNFe>
+</NFe>

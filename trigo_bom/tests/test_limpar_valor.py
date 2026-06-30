@@ -13,9 +13,15 @@ from extracao.nf import _limpar_valor
     ("0,99",       0.99),
     # Com símbolo R$
     ("R$ 1.500,00", 1500.0),
+    ("R$ 80,00",   80.0),
     # Sem separador de milhar
     ("250,00",     250.0),
+    ("1234,56",    1234.56),
     ("1234.56",    1234.56),
+    # Ponto como separador de MILHAR, sem centavos (antes virava 1.5 — bug)
+    ("1.500",      1500.0),
+    ("10.000",     10000.0),
+    ("1.234.567",  1234567.0),
     # Valor inteiro sem centavos
     ("500",        500.0),
     # Zeros e limites

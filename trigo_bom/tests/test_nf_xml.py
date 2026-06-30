@@ -7,11 +7,13 @@ import pytest
 from extracao.nf_xml import extrair_nf_xml
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "nfe_exemplo.xml")
+FIXTURE_COM_DEST_SAUDE = os.path.join(os.path.dirname(__file__), "fixtures", "nfe_com_dest_saude.xml")
 
 
 # ── Estrutura obrigatória ─────────────────────────────────────────────────────
 
-CHAVES_NF_XML = {"numero", "fornecedor", "data_emissao", "valor", "itens", "arquivo_xml"}
+CHAVES_NF_XML = {"numero", "fornecedor", "data_emissao", "valor", "itens",
+                 "destinatario", "orgao_id", "arquivo_xml"}
 
 
 def test_retorna_json_valido():
@@ -88,6 +90,24 @@ def test_item2_valores():
     assert it["quantidade"] == pytest.approx(20.0)
     assert it["valor_unitario"] == pytest.approx(8.5)
     assert it["valor_total"] == pytest.approx(170.0)
+
+
+# ── Destinatário / detecção automática de órgão (CLAUDE.md seção 6.3) ────────
+
+def test_xml_sem_dest_tem_destinatario_vazio_e_orgao_none():
+    r = json.loads(extrair_nf_xml(FIXTURE))
+    assert r["destinatario"] == ""
+    assert r["orgao_id"] is None
+
+
+def test_xml_com_dest_extrai_destinatario():
+    r = json.loads(extrair_nf_xml(FIXTURE_COM_DEST_SAUDE))
+    assert r["destinatario"] == "SECRETARIA MUNICIPAL DE SAUDE DE GOIANAPOLIS"
+
+
+def test_xml_com_dest_detecta_orgao_saude():
+    r = json.loads(extrair_nf_xml(FIXTURE_COM_DEST_SAUDE))
+    assert r["orgao_id"] == 2
 
 
 # ── Arquivo inexistente ───────────────────────────────────────────────────────

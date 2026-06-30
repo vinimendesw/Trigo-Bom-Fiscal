@@ -72,3 +72,49 @@ def test_status_entrega_atrasada(db_isolado):
     repo.atualizar_status_entrega_oc(json.dumps({"id": oc_id, "status_entrega": "atrasada"}))
     ocs = json.loads(repo.listar_ordens_compra())
     assert ocs[0]["status_entrega"] == "atrasada"
+
+
+def test_excluir_oc_remove_registro(db_isolado):
+    oc_id = json.loads(repo.salvar_ordem_compra(json.dumps(OC_BASE)))["id"]
+    repo.excluir_ordem_compra(oc_id)
+    assert json.loads(repo.listar_ordens_compra()) == []
+
+
+def test_excluir_oc_remove_itens_em_cascata(db_isolado):
+    oc_id = json.loads(repo.salvar_ordem_compra(json.dumps(OC_BASE)))["id"]
+    repo.excluir_ordem_compra(oc_id)
+    assert json.loads(repo.listar_itens_oc(oc_id)) == []
+
+
+def test_excluir_oc_inexistente_nao_falha(db_isolado):
+    resultado = json.loads(repo.excluir_ordem_compra(9999))
+    assert resultado["ok"] is True
+
+
+def test_excluir_ocs_em_massa(db_isolado):
+    id1 = json.loads(repo.salvar_ordem_compra(json.dumps(OC_BASE)))["id"]
+    id2 = json.loads(repo.salvar_ordem_compra(json.dumps({**OC_BASE, "numero": "OC-2026-002"})))["id"]
+    id3 = json.loads(repo.salvar_ordem_compra(json.dumps({**OC_BASE, "numero": "OC-2026-003"})))["id"]
+
+    resultado = json.loads(repo.excluir_ordens_compra_em_massa(json.dumps({"ids": [id1, id2]})))
+
+    assert resultado["ok"] is True
+    assert resultado["excluidas"] == 2
+    ocs_restantes = json.loads(repo.listar_ordens_compra())
+    assert len(ocs_restantes) == 1
+    assert ocs_restantes[0]["id"] == id3
+
+
+def test_excluir_ocs_em_massa_remove_itens_em_cascata(db_isolado):
+    id1 = json.loads(repo.salvar_ordem_compra(json.dumps(OC_BASE)))["id"]
+    id2 = json.loads(repo.salvar_ordem_compra(json.dumps({**OC_BASE, "numero": "OC-2026-002"})))["id"]
+
+    repo.excluir_ordens_compra_em_massa(json.dumps({"ids": [id1, id2]}))
+
+    assert json.loads(repo.listar_itens_oc(id1)) == []
+    assert json.loads(repo.listar_itens_oc(id2)) == []
+
+
+def test_excluir_ocs_em_massa_lista_vazia(db_isolado):
+    resultado = json.loads(repo.excluir_ordens_compra_em_massa(json.dumps({"ids": []})))
+    assert resultado == {"ok": True, "excluidas": 0}

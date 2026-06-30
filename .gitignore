@@ -15,6 +15,10 @@ build/
 dist/
 *.spec
 
+# Instalador do Tesseract baixado localmente para o build encadeado (~50MB,
+# não versionar — cada dev baixa o seu em installer/vendor/, ver CLAUDE.md 14.3)
+trigo_bom/installer/vendor/*.exe
+
 # Banco e dados locais (não devem ir para o repositório)
 *.db
 *.sqlite

@@ -12,8 +12,11 @@ Estrategia (secao 12 do CLAUDE.md):
 """
 
 import json
+import os
 import shutil
 import socket
+import sqlite3
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
@@ -33,10 +36,61 @@ def _backup_dir() -> Path | None:
     return Path(p) if p else None
 
 
+# ── Snapshot consistente do SQLite ────────────────────────────────────────────
+
+def _snapshot_sqlite(src: Path, dest: Path) -> None:
+    """Grava `dest` como cópia consistente de `src` usando a API nativa
+    `Connection.backup()`, segura mesmo com o banco em uso (WAL / transação em
+    andamento) — ao contrário de `shutil.copy2`, que pode capturar o arquivo no
+    meio de uma escrita. Se `src` não for um SQLite válido (ex.: arquivos de
+    teste com bytes arbitrários), cai para cópia direta."""
+    try:
+        with closing(sqlite3.connect(str(src))) as origem, \
+             closing(sqlite3.connect(str(dest))) as destino:
+            origem.backup(destino)
+        return
+    except sqlite3.DatabaseError:
+        pass
+    shutil.copy2(src, dest)
+
+
+def _escrever_json_atomico(destino: Path, dados: dict) -> None:
+    """Grava JSON via arquivo temporário + os.replace (troca atômica): um leitor
+    nunca vê o metadado parcialmente escrito, e uma falha no meio não corrompe o
+    arquivo anterior."""
+    tmp = destino.with_name(destino.name + ".tmp")
+    tmp.write_text(json.dumps(dados, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, destino)
+
+
+# ── Versão monotônica (independe do relógio entre dispositivos) ───────────────
+
+def _versao_path() -> Path:
+    """Contador de versão do banco local, guardado ao lado do próprio banco
+    (APPDATA/TrigoBom). Incrementado a cada backup; comparado ao do metadado
+    para decidir restauração sem depender de timestamps entre máquinas."""
+    return _db_local().parent / "trigo_bom_versao.txt"
+
+
+def _ler_versao_local() -> int:
+    try:
+        return int(_versao_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _gravar_versao_local(v: int) -> None:
+    try:
+        _versao_path().write_text(str(v), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # ── Backup ────────────────────────────────────────────────────────────────────
 
 def fazer_backup() -> bool:
-    """Copia banco local para pasta_backup. Retorna True se bem-sucedido."""
+    """Grava snapshot consistente do banco local em pasta_backup e, só depois,
+    o metadado (com timestamp, hostname e versão). Retorna True se bem-sucedido."""
     d = _backup_dir()
     if not d:
         return False
@@ -44,14 +98,16 @@ def fazer_backup() -> bool:
     if not src.exists():
         return False
     try:
-        shutil.copy2(src, d / "trigo_bom.db")
+        _snapshot_sqlite(src, d / "trigo_bom.db")
+        nova_versao = _ler_versao_local() + 1
         meta = {
             "ts": datetime.now().isoformat(),
             "hostname": socket.gethostname(),
+            "versao": nova_versao,
         }
-        (d / "trigo_bom_backup.json").write_text(
-            json.dumps(meta, ensure_ascii=False), encoding="utf-8"
-        )
+        # Metadado só é escrito após o .db ter sido gravado com sucesso.
+        _escrever_json_atomico(d / "trigo_bom_backup.json", meta)
+        _gravar_versao_local(nova_versao)
         return True
     except Exception:
         return False
@@ -60,7 +116,10 @@ def fazer_backup() -> bool:
 def verificar_backup_mais_novo() -> dict | None:
     """
     Retorna o dict do metadado do backup se ele for mais novo que o banco local.
-    Retorna None se não há backup configurado, ou se o banco local é mais recente.
+    Compara pela versão monotônica quando disponível (robusto a diferenças de
+    relógio entre dispositivos); cai para o timestamp só como compatibilidade
+    com backups antigos sem o campo "versao". Retorna None se não há backup
+    configurado ou se o local está igual/mais recente.
     """
     d = _backup_dir()
     if not d:
@@ -71,8 +130,17 @@ def verificar_backup_mais_novo() -> dict | None:
         return None
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        ts_backup = datetime.fromisoformat(meta["ts"])
     except Exception:
+        return None
+
+    versao_backup = meta.get("versao")
+    if versao_backup is not None:
+        return meta if versao_backup > _ler_versao_local() else None
+
+    # Fallback de compatibilidade (backups antigos, sem "versao"): timestamp.
+    try:
+        ts_backup = datetime.fromisoformat(meta["ts"])
+    except (KeyError, ValueError):
         return None
 
     local = _db_local()
@@ -84,7 +152,9 @@ def verificar_backup_mais_novo() -> dict | None:
 
 
 def restaurar_backup() -> bool:
-    """Sobrescreve o banco local com o backup. Retorna True se bem-sucedido."""
+    """Sobrescreve o banco local com o backup (snapshot consistente) e alinha a
+    versão local à do backup restaurado, para o app não reoferecer a mesma
+    restauração na abertura seguinte. Retorna True se bem-sucedido."""
     d = _backup_dir()
     if not d:
         return False
@@ -92,7 +162,15 @@ def restaurar_backup() -> bool:
     if not backup_db.exists():
         return False
     try:
-        shutil.copy2(backup_db, _db_local())
+        _snapshot_sqlite(backup_db, _db_local())
+        meta_path = d / "trigo_bom_backup.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                if meta.get("versao") is not None:
+                    _gravar_versao_local(int(meta["versao"]))
+            except Exception:
+                pass
         return True
     except Exception:
         return False

@@ -4,12 +4,22 @@ from openpyxl.styles import Font
 from db import repositorio
 
 
-def exportar_itens_oc(ordem_compra_id: int, caminho_destino: str) -> str:
-    itens = json.loads(repositorio.listar_itens_oc(ordem_compra_id))
+def exportar_itens_lista(lista_id: int, caminho_destino: str) -> str:
+    """
+    Exporta os itens AGREGADOS de uma lista de compras para .xlsx.
+    As quantidades de itens com mesma descrição (normalizada) já vêm somadas
+    pelo repositório.
+    """
+    listas = json.loads(repositorio.listar_listas_com_ocs())
+    lista = next((l for l in listas if l["id"] == lista_id), None)
+    if lista is None:
+        return json.dumps({"ok": False, "erro": "Lista não encontrada"})
+
+    itens = lista.get("itens_agregados", [])
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "Itens OC"
+    ws.title = lista.get("nome", "Lista")
 
     cabecalho = ["#", "Descrição", "UN", "Quantidade", "Valor Unitário", "Valor Total"]
     ws.append(cabecalho)
