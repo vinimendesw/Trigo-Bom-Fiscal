@@ -74,10 +74,13 @@ Source: "{#DistDir}\*"; \
 ; A entrada abaixo só é extraída e executada se NeedsTesseract() retornar True.
 ; deleteafterinstall: remove o arquivo de {tmp} após a instalação do Tesseract,
 ; sem deixar resíduos no sistema do cliente.
-Source: "vendor\tesseract-setup.exe"; \
+#define TessVendor "vendor\tesseract-setup.exe"
+#if FileExists(TessVendor)
+Source: "{#TessVendor}"; \
   DestDir: "{tmp}"; \
   Flags: deleteafterinstall; \
   Check: NeedsTesseract
+#endif
 
 ; ── [Icons] ───────────────────────────────────────────────────────────────────
 ; Atalhos criados pelo instalador.
@@ -171,12 +174,12 @@ begin
   if not Result and NeedsTesseract() then
     MsgBox(
       'O Tesseract OCR não está instalado neste computador e o pacote de ' +
-      'instalação do Tesseract não foi incluído neste instalador.' + #13#10 +
-      #13#10 +
+      'instalação do Tesseract não foi incluído neste instalador.' + Chr(13) + Chr(10) +
+      Chr(13) + Chr(10) +
       'Para habilitar a leitura de PDFs com texto corrompido (OCR), instale ' +
-      'manualmente o Tesseract OCR em:' + #13#10 +
-      'https://github.com/UB-Mannheim/tesseract/wiki' + #13#10 +
-      #13#10 +
+      'manualmente o Tesseract OCR em:' + Chr(13) + Chr(10) +
+      'https://github.com/UB-Mannheim/tesseract/wiki' + Chr(13) + Chr(10) +
+      Chr(13) + Chr(10) +
       'O TrigoBom funcionará normalmente para PDFs comuns. O OCR fica ' +
       'indisponível até o Tesseract ser instalado.',
       mbInformation, MB_OK

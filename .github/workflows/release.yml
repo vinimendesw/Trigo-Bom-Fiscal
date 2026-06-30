@@ -1,0 +1,79 @@
+name: Release
+
+# Dispara somente em tags vX.Y.Z — nunca em commits normais.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest   # Obrigatório: PyInstaller + Inno Setup são Windows-only
+
+    permissions:
+      contents: write         # Necessário para criar a Release e fazer upload do asset
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Python ──────────────────────────────────────────────────────────
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Dependências do projeto ─────────────────────────────────────────
+      # Cria o venv em trigo_bom/.venv, exatamente como o build.ps1 espera.
+      - name: Instalar dependências
+        working-directory: trigo_bom
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip --quiet
+          .venv\Scripts\pip.exe install -r requirements.txt --quiet
+
+      # ── 4. Inno Setup ─────────────────────────────────────────────────────
+      # Instala via Chocolatey (já disponível no runner windows-latest).
+      # O iscc.exe fica em C:\Program Files (x86)\Inno Setup 6\iscc.exe,
+      # que é exatamente o caminho padrão do build.ps1.
+      - name: Instalar Inno Setup 6
+        run: choco install innosetup --version=6.4.3 -y --no-progress
+
+      # ── 5. Tesseract vendorizado ───────────────────────────────────────────
+      # Baixa o instalador oficial UB-Mannheim e salva no caminho que o
+      # trigo_bom.iss espera (installer/vendor/tesseract-setup.exe).
+      # A versão abaixo é a 5.5.0; ajuste a URL se quiser uma versão diferente.
+      - name: Baixar instalador do Tesseract (vendor)
+        run: |
+          $url  = "https://github.com/UB-Mannheim/tesseract/releases/download/v5.5.0.20241111/tesseract-ocr-w64-setup-5.5.0.20241111.exe"
+          $dest = "trigo_bom\installer\vendor\tesseract-setup.exe"
+          New-Item -ItemType Directory -Force -Path "trigo_bom\installer\vendor" | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing
+          Write-Host "Tesseract vendor baixado: $(Get-Item $dest | Select-Object -ExpandProperty Length) bytes"
+
+      # ── 6. Build (PyInstaller + Inno Setup) ───────────────────────────────
+      - name: Rodar build.ps1
+        working-directory: trigo_bom
+        run: .\build.ps1
+
+      # ── 7. Ler versão e localizar o instalador ─────────────────────────────
+      # Exporta como variável de ambiente para os passos seguintes.
+      - name: Ler versão do app
+        id: versao
+        working-directory: trigo_bom
+        run: |
+          $ver = .venv\Scripts\python.exe -c "exec(open('app/__version__.py').read()); print(__version__)"
+          echo "versao=$ver" >> $env:GITHUB_OUTPUT
+          echo "instalador=dist\TrigoBomSetup-$ver.exe" >> $env:GITHUB_OUTPUT
+
+      # ── 8. Publicar Release no GitHub ─────────────────────────────────────
+      # Cria a Release com a tag atual e faz upload do .exe como único asset.
+      # generate_release_notes: true cria automaticamente o changelog com os
+      # commits desde a tag anterior — sem precisar escrever nada manualmente.
+      - name: Publicar Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "TrigoBom Fiscal v${{ steps.versao.outputs.versao }}"
+          generate_release_notes: true
+          files: trigo_bom/${{ steps.versao.outputs.instalador }}
