@@ -17,6 +17,29 @@ Entradas mais recentes ficam no topo.
 
 ---
 
+## [2026-07-02] Dedup por número da NF passa a consultar o banco diretamente
+
+- A 2ª camada de verificação de duplicidade (por número da NF) na revisão de PDFs detectados deixou de comparar contra a lista em memória `estado.nfs` e passa a consultar o banco diretamente, evitando falso-negativo quando a lista do front-end estiver desatualizada. Novo `repositorio.numero_nf_existe()` + slot `Bridge.numero_nf_existe`; `app.js` atualiza o aviso de forma assíncrona ao abrir a revisão. Comportamento mantido: alerta visível, não bloqueia.
+
+**Arquivos afetados:** `trigo_bom/app/db/repositorio.py`, `trigo_bom/app/bridge.py`, `trigo_bom/app/ui/app.js`
+
+## [2026-07-02] Máscara de valores, pasta de entrada com leitura automática e backup a cada 3 min
+
+- **Máscara de moeda (R$):** novas funções `mascararMoeda()`/`moedaParaMascara()` em `app.js` no padrão "dígitos como centavos" (ex.: digitar `125000` exibe `1.250,00`), aplicadas via listener `input` no campo `#nf-valor` e no input de `valor_unitario` das linhas de item da NF. Valores existentes são exibidos já formatados; o valor salvo continua saindo por `parseBRL()` (float), preservando a compatibilidade.
+- **Pasta de entrada monitorada (tempo real):** a `pasta_nfs` (já configurável) passa a ser também monitorada por `QFileSystemWatcher`. Ao detectar um PDF novo, a extração assíncrona (`extrair_nf` via `QThreadPool`) é disparada e o resultado vai para uma **fila de revisão** na tela Notas Fiscais — nada é salvo automaticamente. Baseline/dedup por nome: um PDF só é "novo" se seu nome não constar em `notas_fiscais.arquivo_pdf` (cobre o histórico já importado). 2ª camada de dedup por número da NF: aviso visível na revisão (não bloqueia). Descartar um item apenas o dispensa da revisão atual — reaparece na próxima verificação (não é ignorado permanentemente). O watcher é reiniciado quando a pasta é alterada em Configurações. Salvar pela revisão reaproveita `salvar_nf`; como o PDF já está na pasta, `_copiar_pdf` não regrava (`dest == src`), evitando loop no watcher.
+- **Backup automático:** intervalo do timer reduzido de 10 para 3 minutos (`_BACKUP_INTERVAL_MS` em `main.py`). O debounce de 3s do backup por escrita (`bridge.py`) não foi alterado.
+- Validação: testes de lógica da máscara (formatação em tempo real + round-trip `parseBRL`); smoke test do watcher (baseline, detecção, dedup por nome, descarte→reaparecimento, troca de pasta); conferência do estilo da fila de revisão e do aviso de duplicidade via inspeção de CSS no preview; suíte completa (245 testes) passando.
+
+**Arquivos afetados:** `trigo_bom/app/main.py`, `trigo_bom/app/bridge.py`, `trigo_bom/app/db/repositorio.py`, `trigo_bom/app/ui/app.js`, `trigo_bom/app/ui/index.html`, `trigo_bom/app/ui/styles.css`
+
+## [2026-07-02] Correção do KPI "A receber" negativo e do ícone de Configurações
+
+- **BUG 1 — KPI "A receber" negativo:** o cálculo de `kpi-saldo` no dashboard passava a usar a mesma base de competência das entradas (`nfsMes`, por `data_emissao`). "A receber" agora é a soma das NFs do mês emitidas e ainda não pagas (`status_pagamento != 'pago'`), em vez de `entradas - recebido`. Isso elimina o saldo negativo quando uma NF é emitida em um mês e paga no seguinte. Os KPIs "Entradas" e "Recebido" foram mantidos com suas bases originais (intencionalmente diferentes).
+- **BUG 2 — ícone de Configurações descentralizado:** o `<path>` customizado e assimétrico da engrenagem foi substituído pelo ícone "settings" padrão do Feather/Lucide (simétrico), mantendo o `<circle cx="12" cy="12" r="3">` e os atributos do SVG.
+- Validação: ícone conferido visualmente no preview (engrenagem simétrica e centrada); lógica do dashboard testada com NF emitida em Jan e paga em Fev, confirmando que "A receber" não fica negativo.
+
+**Arquivos afetados:** `trigo_bom/app/ui/app.js`, `trigo_bom/app/ui/index.html`
+
 ## [2026-06-30] Infraestrutura de build e empacotamento implementada
 
 - `requirements.txt` atualizado: todos os `>=` trocados por `==` com as

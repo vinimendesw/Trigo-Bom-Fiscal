@@ -62,3 +62,11 @@ CREATE TABLE IF NOT EXISTS itens_ordem_compra (
     valor_unitario  REAL,
     valor_total     REAL
 );
+
+-- SQLite não indexa FKs automaticamente: sem estes índices, ON DELETE CASCADE
+-- e os lookups de dedup (numero_nf_existe / nomes_pdf_nf_registrados) fazem
+-- full scan por operação. (idx_oc_lista fica em _migrar(): a coluna lista_id
+-- só existe após a migração em bancos antigos.)
+CREATE INDEX IF NOT EXISTS idx_itens_nf_nota  ON itens_nota_fiscal(nota_fiscal_id);
+CREATE INDEX IF NOT EXISTS idx_itens_oc_ordem ON itens_ordem_compra(ordem_compra_id);
+CREATE INDEX IF NOT EXISTS idx_nf_numero      ON notas_fiscais(numero);

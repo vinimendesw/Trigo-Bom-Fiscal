@@ -159,6 +159,27 @@ tbody tr:hover td { background: #fafafa; }
 .nf-card .btn-desfazer { background: #f1f1f1; color: #666; }
 .nf-card .btn-desfazer:hover { background: #e5e5e5; }
 
+/* ===== Fila de revisão (pasta de entrada monitorada) ===== */
+.revisao-bar { background: #fff8e6; border: 1px solid #f2d98a; border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+.revisao-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.revisao-titulo { font-size: 13px; font-weight: 700; color: #8a6100; }
+.revisao-sub { font-size: 11px; color: #a98b3e; }
+.revisao-lista { display: flex; flex-direction: column; gap: 8px; }
+.revisao-item { background: #fff; border: 1px solid #ececec; border-radius: 8px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.revisao-item .info { min-width: 0; flex: 1; }
+.revisao-item .nome { font-size: 12px; font-weight: 700; color: #1a1a1a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.revisao-item .preview { font-size: 11px; color: #888; margin-top: 2px; }
+.revisao-item .preview.erro { color: #c90914; }
+.revisao-item .acoes { display: flex; gap: 8px; flex-shrink: 0; }
+.revisao-item .btn-acao { font-size: 11px; font-weight: 600; border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; white-space: nowrap; }
+.revisao-item .btn-revisar { background: #fdeceb; color: #c90914; }
+.revisao-item .btn-revisar:hover { background: #f9d9d7; }
+.revisao-item .btn-descartar { background: #f1f1f1; color: #666; }
+.revisao-item .btn-descartar:hover { background: #e5e5e5; }
+
+/* Aviso de duplicidade por número na tela de revisão/inclusão de NF */
+.dup-aviso { background: #fdeceb; border: 1px solid #f2b8b4; color: #c90914; font-size: 12px; font-weight: 600; border-radius: 8px; padding: 10px 12px; margin-top: 12px; }
+
 /* ===== Licitações ===== */
 .lic-card { background: #fff; border: 1px solid #ececec; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.04); padding: 16px 20px; margin-bottom: 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .lic-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.09); }

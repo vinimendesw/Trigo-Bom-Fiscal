@@ -39,6 +39,9 @@ const estado = {
   // Extração assíncrona (correlação request_id → callback)
   pendentesExtracao: {},
   reqSeq:          0,
+  // Fila de revisão: PDFs detectados na pasta de entrada aguardando confirmação
+  filaRevisao:     [],
+  nfRevisaoCaminho: null,       // caminho do PDF sendo revisado (fluxo da fila)
 };
 
 const ORGAOS = { 1: 'Administração', 2: 'Saúde', 3: 'Educação', 4: 'Assistência Social' };
@@ -90,6 +93,27 @@ function parseBRL(s) {
   else s = s.replace(',', '.');
   const v = parseFloat(s);
   return isNaN(v) ? null : v;
+}
+// Máscara de moeda "dígitos como centavos": cada dígito digitado empurra os
+// anteriores, formatando com separador de milhar "." e decimal ",".
+// Ex.: digitar "125000" resulta em "1.250,00". Formata o próprio campo no evento
+// `input`; o valor final salvo continua saindo por parseBRL() (float), então a
+// máscara é apenas de apresentação e compatível com o fluxo existente.
+function mascararMoeda(el) {
+  const digitos = el.value.replace(/\D/g, '');
+  if (!digitos) { el.value = ''; return; }
+  const centavos = parseInt(digitos, 10);
+  el.value = (centavos / 100).toLocaleString('pt-BR', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+// Formata um float já existente (edição/pré-preenchimento) no mesmo padrão da
+// máscara, para o campo exibir o valor já formatado ao ser carregado.
+function moedaParaMascara(v) {
+  if (v == null || isNaN(v)) return '';
+  return Number(v).toLocaleString('pt-BR', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
 }
 function fmtData(iso) {
   if (!iso) return '—';
@@ -160,6 +184,8 @@ function iniciar() {
     const cb = estado.pendentesExtracao[requestId];
     if (cb) { delete estado.pendentesExtracao[requestId]; cb(json); }
   });
+  // Fila de revisão (pasta de entrada) mudou no backend → recarrega e re-renderiza.
+  backend.filaRevisaoAtualizada.connect(() => carregarFilaRevisao());
   vincularEventos();
   carregarTudo();
 }
@@ -186,6 +212,102 @@ function carregarTudo() {
     });
   });
   backend.carregar_config(raw => { estado.config = JSON.parse(raw); renderConfiguracoes(); });
+  carregarFilaRevisao();
+}
+
+// ─── Fila de revisão (pasta de entrada monitorada) ─────────────────────────────
+function carregarFilaRevisao() {
+  backend.listar_fila_revisao(raw => {
+    estado.filaRevisao = JSON.parse(raw);
+    renderFilaRevisao();
+  });
+}
+
+function renderFilaRevisao() {
+  const bar   = document.getElementById('revisao-bar');
+  const lista = document.getElementById('revisao-lista');
+  const cont  = document.getElementById('revisao-contagem');
+  const itens = estado.filaRevisao || [];
+  if (!itens.length) { bar.style.display = 'none'; lista.innerHTML = ''; return; }
+  bar.style.display = '';
+  cont.textContent = itens.length;
+  lista.innerHTML = itens.map(item => {
+    const d = item.dados || {};
+    const preview = d._erro
+      ? `<div class="preview erro">Falha na leitura: ${escapeHtml(d._erro)}</div>`
+      : `<div class="preview">NF ${escapeHtml(d.numero) || '—'} · ${d.valor != null ? fmtBRL(d.valor) : 'valor —'} · ${d.data_emissao ? fmtData(d.data_emissao) : 'data —'}</div>`;
+    const cam = escapeHtml(item.caminho);
+    return `<div class="revisao-item">
+      <div class="info">
+        <div class="nome">${escapeHtml(item.nome)}</div>
+        ${preview}
+      </div>
+      <div class="acoes">
+        <button class="btn-acao btn-revisar" data-caminho="${cam}">Revisar</button>
+        <button class="btn-acao btn-descartar" data-caminho="${cam}">Descartar</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  lista.querySelectorAll('.btn-revisar[data-caminho]').forEach(btn =>
+    btn.addEventListener('click', () => revisarNFDetectada(btn.dataset.caminho)));
+  lista.querySelectorAll('.btn-descartar[data-caminho]').forEach(btn =>
+    btn.addEventListener('click', () => descartarNFDetectada(btn.dataset.caminho)));
+}
+
+// Abre o formulário de inclusão de NF pré-preenchido com os dados extraídos do
+// PDF detectado, para conferência/correção antes de confirmar. O PDF já está
+// dentro da pasta_nfs; salvar reaproveita salvar_nf (origem 'pdf' → _copiar_pdf
+// não regrava porque dest == src, evitando novo evento no watcher).
+function revisarNFDetectada(caminho) {
+  const item = (estado.filaRevisao || []).find(i => i.caminho === caminho);
+  if (!item) return;
+  const d = item.dados || {};
+
+  estado.viewAnteriorNF   = 'pagamentos';
+  resetarFormNF();
+  estado.nfFormModo       = 'pdf';
+  estado.nfFormCaminho    = caminho;
+  estado.nfRevisaoCaminho = caminho;
+  estado.nfFilaLote       = [];
+  estado.nfFilaIdx        = 0;
+
+  // Preenche os campos com o que foi extraído.
+  document.getElementById('nf-numero').value       = d.numero || '';
+  document.getElementById('nf-data-emissao').value = d.data_emissao || '';
+  document.getElementById('nf-valor').value        = d.valor != null ? moedaParaMascara(d.valor) : '';
+  document.querySelectorAll('#nf-orgao-tags .tag').forEach(t => t.classList.remove('selected'));
+  if (d.orgao_id) {
+    const tag = document.querySelector(`#nf-orgao-tags .tag[data-val="${d.orgao_id}"]`);
+    if (tag) tag.classList.add('selected');
+  }
+
+  // Verificação de duplicidade por número (2.6): alerta, não bloqueia.
+  // Consulta o banco diretamente (não depende da lista em memória estado.nfs),
+  // então o aviso é atualizado de forma assíncrona quando a resposta chega.
+  const aviso = document.getElementById('nf-dup-aviso');
+  aviso.style.display = 'none';
+  if (d.numero) {
+    backend.numero_nf_existe(String(d.numero), raw => {
+      aviso.style.display = JSON.parse(raw).existe ? '' : 'none';
+    });
+  }
+
+  // Mostra o formulário de confirmação como no fluxo de extração de PDF.
+  document.getElementById('nf-conf-titulo').textContent  = 'Revisar nota detectada';
+  document.getElementById('nf-sec-arquivo').style.display = 'none';
+  document.getElementById('nf-form-dados').style.display  = '';
+  document.getElementById('nf-modo-wrap').style.display   = 'none';
+  document.getElementById('nf-lote-progress').style.display = 'none';
+  document.getElementById('btn-pular-nf').style.display   = 'none';
+  navegarPara('incluir-nf', 'pagamentos');
+}
+
+function descartarNFDetectada(caminho) {
+  backend.descartar_revisao(caminho, () => {
+    mostrarToast('Nota dispensada da revisão.');
+    // A fila é recarregada pelo sinal filaRevisaoAtualizada emitido no backend.
+  });
 }
 
 function recarregarListas(cb) {
@@ -361,6 +483,8 @@ function vincularEventos() {
     document.getElementById('toggle-pago').classList.remove('checked');
     document.getElementById('field-data-pagamento').style.display = 'none';
   });
+  // Máscara de moeda no campo de valor da NF (formata durante a digitação).
+  document.getElementById('nf-valor').addEventListener('input', e => mascararMoeda(e.target));
   vincularTagsUnicas('nf-orgao-tags');
   // #nf-categoria-tags removido do HTML (2026-06-29) — sem vínculo aqui.
   document.getElementById('btn-salvar-nf').addEventListener('click', salvarNFAtual);
@@ -428,11 +552,15 @@ function renderDashboard() {
 
   const entradas  = nfsMes.reduce((s, nf) => s + (nf.valor || 0), 0);
   const recebido  = nfsRecebidasMes.reduce((s, nf) => s + (nf.valor || 0), 0);
+  // "A receber": NFs da mesma competência (nfsMes, por data_emissao) ainda não pagas.
+  // Não usar nfsRecebidasMes aqui — bases de tempo diferentes tornariam o saldo negativo
+  // quando uma NF é emitida em um mês e paga no seguinte.
+  const aReceber  = nfsMes.filter(nf => nf.status_pagamento !== 'pago').reduce((s, nf) => s + (nf.valor || 0), 0);
   const pendentes = nfsMes.filter(nf => nf.status_pagamento !== 'pago').length;
 
   document.getElementById('kpi-entradas').textContent = fmtBRL(entradas);
   document.getElementById('kpi-recebido').textContent = fmtBRL(recebido);
-  document.getElementById('kpi-saldo').textContent    = fmtBRL(entradas - recebido);
+  document.getElementById('kpi-saldo').textContent    = fmtBRL(aReceber);
   document.getElementById('dash-badge').textContent   = pendentes > 0
     ? `${pendentes} NF${pendentes > 1 ? 's' : ''} pendente${pendentes > 1 ? 's' : ''}`
     : 'Tudo em dia';
@@ -1167,6 +1295,10 @@ function resetarFormNF() {
   estado.nfFormItens   = [];
   estado.nfFilaLote    = [];
   estado.nfFilaIdx     = 0;
+  estado.nfRevisaoCaminho = null;
+
+  const dupAviso = document.getElementById('nf-dup-aviso');
+  if (dupAviso) dupAviso.style.display = 'none';
 
   mostrarLendoNF(false);
   document.querySelectorAll('.modo-tab').forEach(t => t.classList.toggle('active', t.dataset.modo === 'pdf'));
@@ -1282,8 +1414,7 @@ function processarProximaNF() {
     document.getElementById('nf-numero').value       = d.numero || '';
 
     document.getElementById('nf-data-emissao').value = d.data_emissao || '';
-    if (d.valor != null) document.getElementById('nf-valor').value =
-      Number(d.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+    if (d.valor != null) document.getElementById('nf-valor').value = moedaParaMascara(d.valor);
 
     // Detecção automática do órgão (CLAUDE.md seção 6.3) — pré-seleciona a
     // tag sem exigir confirmação manual; usuário pode trocar antes de salvar.
@@ -1322,7 +1453,7 @@ function renderItensNFForm(editavel) {
       <td>${i+1}</td>
       <td>${editavel ? `<input type="text" value="${escapeHtml(it.descricao)}" style="width:100%;" oninput="estado.nfFormItens[${i}].descricao=this.value" />` : (escapeHtml(it.descricao)||'—')}</td>
       <td>${editavel ? `<input type="number" value="${it.quantidade||''}" style="width:70px;" oninput="estado.nfFormItens[${i}].quantidade=parseFloat(this.value)||null" />` : (it.quantidade!=null?it.quantidade:'—')}</td>
-      <td>${editavel ? `<input type="text" value="${it.valor_unitario!=null?it.valor_unitario:''}" style="width:80px;" oninput="estado.nfFormItens[${i}].valor_unitario=parseBRL(this.value)" />` : fmtBRL(it.valor_unitario)}</td>
+      <td>${editavel ? `<input type="text" value="${it.valor_unitario!=null?moedaParaMascara(it.valor_unitario):''}" style="width:80px;" oninput="mascararMoeda(this);estado.nfFormItens[${i}].valor_unitario=parseBRL(this.value)" />` : fmtBRL(it.valor_unitario)}</td>
       <td>${editavel ? `<input type="text" value="${it.valor_total!=null?it.valor_total:''}" style="width:80px;" oninput="estado.nfFormItens[${i}].valor_total=parseBRL(this.value)" />` : fmtBRL(it.valor_total)}</td>
       <td>${escapeHtml(it.ncm)}</td>
       <td>${editavel ? `<button class="btn-remover-item" onclick="removerItemNF(${i})">✕</button>` : ''}</td>
@@ -1366,6 +1497,11 @@ function salvarNFAtual() {
       avancarNFLote();
     } else {
       mostrarToast('Nota fiscal salva.');
+      // Se veio da fila de revisão, dispensa o item (já está no banco; não
+      // reaparecerá porque o arquivo_pdf agora consta em notas_fiscais).
+      const caminhoRev = estado.nfRevisaoCaminho;
+      estado.nfRevisaoCaminho = null;
+      if (caminhoRev) backend.descartar_revisao(caminhoRev, () => {});
       backend.listar_nfs(raw => { estado.nfs = JSON.parse(raw); renderNFs(); renderDashboard(); });
       navegarPara('pagamentos', 'pagamentos');
     }

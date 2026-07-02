@@ -1,9 +1,12 @@
 import json
+import os
 import shutil
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
     QObject, Slot, Signal, QTimer, QRunnable, QThreadPool, Qt,
+    QFileSystemWatcher,
 )
 from PySide6.QtWidgets import QFileDialog
 
@@ -36,19 +39,36 @@ def _copiar_pdf(caminho_original: str, chave_pasta: str) -> str:
         return caminho_original
 
 
-# Backup com debounce: cada escrita reagenda um único backup para depois de um
-# curto período de quietude, em vez de copiar o banco inteiro (shutil.copy2)
-# sincronamente na thread principal a cada operação — o que congelava a UI quando
-# a pasta de backup é uma unidade lenta (HD externo) ou sincronizada (Drive/OneDrive).
+# Backup com debounce + execução em worker: cada escrita reagenda um único
+# backup para depois de um curto período de quietude, e o snapshot em si roda
+# num worker do QThreadPool — o Connection.backup() numa unidade lenta (HD
+# externo, Drive/OneDrive) bloqueava a UI quando executava no timer da thread
+# principal, mesmo com o debounce reduzindo a frequência.
 _BACKUP_DEBOUNCE_MS = 3000
 _backup_timer: QTimer | None = None
+_backup_rodando = False
+
+
+class _TarefaBackup(QRunnable):
+    def run(self):
+        global _backup_rodando
+        try:
+            bkp.fazer_backup()
+        except Exception:
+            pass
+        finally:
+            _backup_rodando = False
 
 
 def _executar_backup():
-    try:
-        bkp.fazer_backup()
-    except Exception:
-        pass
+    global _backup_rodando
+    if _backup_rodando:
+        # Snapshot anterior ainda em andamento (unidade lenta) — reagenda em vez
+        # de rodar duas escritas concorrentes no mesmo arquivo de destino.
+        _fazer_backup()
+        return
+    _backup_rodando = True
+    QThreadPool.globalInstance().start(_TarefaBackup())
 
 
 def _fazer_backup():
@@ -60,6 +80,21 @@ def _fazer_backup():
         _backup_timer.timeout.connect(_executar_backup)
     # Reinicia a contagem: o backup só roda 3s após a última escrita.
     _backup_timer.start(_BACKUP_DEBOUNCE_MS)
+
+
+def fazer_backup_async() -> None:
+    """Dispara um backup imediato em worker, sem debounce — usado pelo timer
+    periódico do main.py."""
+    _executar_backup()
+
+
+def aguardar_backup(timeout_ms: int = 10000) -> None:
+    """Bloqueia até o backup em worker terminar (ou estourar o timeout). Usado
+    no fechamento do app, antes do snapshot final síncrono, para não haver duas
+    escritas concorrentes no mesmo destino."""
+    fim = time.monotonic() + timeout_ms / 1000
+    while _backup_rodando and time.monotonic() < fim:
+        time.sleep(0.05)
 
 
 # Extração assíncrona: rodar a leitura de PDF/XML diretamente no corpo de um
@@ -88,11 +123,37 @@ class _TarefaExtracao(QRunnable):
         self._emissor.pronto.emit(self._request_id, resultado)
 
 
+# Extração de PDFs detectados na pasta de entrada (watcher). Igual ao mecanismo
+# acima (QThreadPool para não travar a GUI), mas o resultado é tratado no próprio
+# Python — vai para a fila de revisão da Bridge, não direto ao JS por request_id.
+class _EmissorRevisao(QObject):
+    pronto = Signal(str, str)  # (caminho, json_resultado)
+
+
+class _TarefaRevisao(QRunnable):
+    def __init__(self, func, caminho: str, emissor: _EmissorRevisao):
+        super().__init__()
+        self._func = func
+        self._caminho = caminho
+        self._emissor = emissor
+
+    def run(self):
+        try:
+            resultado = self._func(self._caminho)
+        except Exception as e:
+            resultado = json.dumps({"_erro": str(e)})
+        self._emissor.pronto.emit(self._caminho, resultado)
+
+
 class Bridge(QObject):
 
     # Sinal exposto ao JS: emitido quando uma extração assíncrona termina.
     # (request_id, json_resultado)
     extracaoConcluida = Signal(str, str)
+
+    # Sinal exposto ao JS: emitido quando a fila de revisão (PDFs detectados na
+    # pasta de entrada) muda — o JS recarrega a lista via listar_fila_revisao().
+    filaRevisaoAtualizada = Signal()
 
     def __init__(self):
         super().__init__()
@@ -105,6 +166,114 @@ class Bridge(QObject):
         self._emissor.pronto.connect(
             self.extracaoConcluida, Qt.ConnectionType.QueuedConnection
         )
+
+        # ── Pasta de entrada monitorada (reaproveita pasta_nfs) ───────────────
+        # Fila de revisão: caminho_completo -> { caminho, nome, dados }.
+        # PDFs detectados na pasta ficam aqui aguardando confirmação manual — NÃO
+        # são salvos automaticamente no banco.
+        self._fila_revisao: dict[str, dict] = {}
+        self._revisao_em_extracao: set[str] = set()
+        self._watcher = QFileSystemWatcher()
+        # Debounce: no Windows, copiar um único arquivo dispara vários
+        # directoryChanged em rajada, e o evento pode chegar com o PDF ainda
+        # sendo gravado. A varredura só roda após um período de quietude,
+        # coalescendo a rajada e reduzindo a chance de ler arquivo parcial.
+        self._debounce_watcher = QTimer(self)
+        self._debounce_watcher.setSingleShot(True)
+        self._debounce_watcher.setInterval(750)
+        self._debounce_watcher.timeout.connect(self._verificar_pasta_nfs)
+        self._watcher.directoryChanged.connect(self._ao_mudar_pasta_nfs)
+        self._emissor_revisao = _EmissorRevisao()
+        self._emissor_revisao.pronto.connect(
+            self._revisao_extracao_pronta, Qt.ConnectionType.QueuedConnection
+        )
+        self._iniciar_watcher_nfs()
+
+    # ── Pasta de entrada de NFs (monitoramento em tempo real) ─────────────────
+
+    def _iniciar_watcher_nfs(self) -> None:
+        """(Re)aponta o QFileSystemWatcher para a pasta_nfs configurada.
+
+        Chamado na inicialização e sempre que o usuário troca a pasta em
+        Configurações. Zera a fila da pasta anterior e faz uma varredura inicial
+        (baseline) para detectar PDFs ainda não importados."""
+        dirs = self._watcher.directories()
+        if dirs:
+            self._watcher.removePaths(dirs)
+        self._fila_revisao.clear()
+        self._revisao_em_extracao.clear()
+        pasta = config.pasta_valida("pasta_nfs")
+        if pasta:
+            self._watcher.addPath(pasta)
+            self._verificar_pasta_nfs()
+
+    def _ao_mudar_pasta_nfs(self, _path: str) -> None:
+        # Reinicia o debounce a cada evento da rajada; a varredura acontece só
+        # depois que a pasta "assenta".
+        self._debounce_watcher.start()
+
+    def _verificar_pasta_nfs(self) -> None:
+        """Varre a pasta e enfileira extração dos PDFs novos.
+
+        "Novo" = arquivo .pdf cujo nome NÃO consta em notas_fiscais.arquivo_pdf
+        (baseline/dedup por nome — 2ª camada, por número, é feita na revisão),
+        que ainda não está na fila nem sendo extraído."""
+        pasta = config.pasta_valida("pasta_nfs")
+        if not pasta:
+            return
+        try:
+            registrados = repositorio.nomes_pdf_nf_registrados()
+        except Exception:
+            registrados = set()
+        try:
+            nomes = os.listdir(pasta)
+        except OSError:
+            return
+        for nome in nomes:
+            if not nome.lower().endswith(".pdf"):
+                continue
+            if nome in registrados:                       # já importado (dedup por nome)
+                continue
+            caminho = str(Path(pasta) / nome)
+            if caminho in self._fila_revisao:             # já aguardando revisão
+                continue
+            if caminho in self._revisao_em_extracao:      # já extraindo
+                continue
+            self._revisao_em_extracao.add(caminho)
+            self._pool.start(_TarefaRevisao(extrair_nf, caminho, self._emissor_revisao))
+
+    def _revisao_extracao_pronta(self, caminho: str, resultado_json: str) -> None:
+        self._revisao_em_extracao.discard(caminho)
+        try:
+            dados = json.loads(resultado_json)
+        except Exception:
+            dados = {"_erro": "resultado inválido"}
+        # O texto integral do PDF não interessa à fila e seria re-serializado ao
+        # JS (via listar_fila_revisao) a cada atualização — em PDFs OCR'd são
+        # centenas de KB por item.
+        dados.pop("_texto_bruto", None)
+        dados.pop("_ocr_usado", None)
+        self._fila_revisao[caminho] = {
+            "caminho": caminho,
+            "nome": Path(caminho).name,
+            "dados": dados,
+        }
+        self.filaRevisaoAtualizada.emit()
+
+    @Slot(result=str)
+    def listar_fila_revisao(self) -> str:
+        return json.dumps(list(self._fila_revisao.values()), ensure_ascii=False)
+
+    @Slot(str, result=str)
+    def descartar_revisao(self, caminho: str) -> str:
+        """Dispensa um PDF da revisão atual, sem marcá-lo como ignorado.
+
+        Como o arquivo continua sem registro em notas_fiscais.arquivo_pdf, ele
+        volta a ser detectado como novo na próxima verificação do watcher — o
+        descarte é apenas uma dispensa da revisão corrente (2.3)."""
+        self._fila_revisao.pop(caminho, None)
+        self.filaRevisaoAtualizada.emit()
+        return json.dumps({"ok": True})
 
     # ── Extração (assíncrona) ────────────────────────────────────────────────
 
@@ -141,6 +310,10 @@ class Bridge(QObject):
     @Slot(int, result=str)
     def listar_itens_nf(self, nota_fiscal_id: int) -> str:
         return repositorio.listar_itens_nf(nota_fiscal_id)
+
+    @Slot(str, result=str)
+    def numero_nf_existe(self, numero: str) -> str:
+        return repositorio.numero_nf_existe(numero)
 
     @Slot(str, result=str)
     def atualizar_status_nf(self, dados_json: str) -> str:
@@ -236,7 +409,14 @@ class Bridge(QObject):
 
     @Slot(str, result=str)
     def salvar_config(self, dados_json: str) -> str:
+        pasta_antes = config.pasta_valida("pasta_nfs")
         config.salvar_config(json.loads(dados_json))
+        # Só reaponta o watcher se a pasta_nfs de fato mudou: reiniciar zera a
+        # fila e re-extrai (com OCR) todos os PDFs pendentes — custo que uma
+        # alteração só de pasta_backup/pasta_ordens_compra não pode pagar.
+        if config.pasta_valida("pasta_nfs") != pasta_antes:
+            self._iniciar_watcher_nfs()
+            self.filaRevisaoAtualizada.emit()
         return json.dumps({"ok": True})
 
     # ── Diálogos ──────────────────────────────────────────────────────────────

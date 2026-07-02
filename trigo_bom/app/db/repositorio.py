@@ -96,6 +96,17 @@ def _migrar():
                 "ALTER TABLE ordens_compra ADD COLUMN lista_id INTEGER REFERENCES listas_compra(id)"
             )
 
+        # Índices (2026-07-02): SQLite não indexa FKs automaticamente — sem
+        # eles, cada ON DELETE CASCADE varre a tabela de itens inteira, e os
+        # lookups de dedup (numero_nf_existe, nomes_pdf_nf_registrados) fazem
+        # full scan de notas_fiscais a cada verificação do watcher.
+        conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_itens_nf_nota  ON itens_nota_fiscal(nota_fiscal_id);
+            CREATE INDEX IF NOT EXISTS idx_itens_oc_ordem ON itens_ordem_compra(ordem_compra_id);
+            CREATE INDEX IF NOT EXISTS idx_oc_lista       ON ordens_compra(lista_id);
+            CREATE INDEX IF NOT EXISTS idx_nf_numero      ON notas_fiscais(numero);
+        """)
+
 
 _inicializar()
 _migrar()
@@ -134,6 +145,38 @@ def salvar_nf(dados_json: str) -> str:
                  item.get("ncm"), item.get("cfop")),
             )
         return json.dumps({"id": nf_id})
+
+
+def numero_nf_existe(numero: str) -> str:
+    """{"existe": bool} — True se já houver alguma NF com este número no banco.
+
+    Consulta direta ao banco (não depende da lista em memória do front-end),
+    usada como 2ª camada de dedup na revisão de PDFs detectados na pasta de
+    entrada. Número vazio nunca é considerado duplicado."""
+    numero = (numero or "").strip()
+    if not numero:
+        return json.dumps({"existe": False})
+    with closing(_conectar()) as conn, conn:
+        row = conn.execute(
+            "SELECT 1 FROM notas_fiscais WHERE numero = ? LIMIT 1", (numero,)
+        ).fetchone()
+    return json.dumps({"existe": row is not None})
+
+
+def nomes_pdf_nf_registrados() -> set:
+    """Nomes de arquivo (basename) de todos os PDFs já vinculados a alguma NF.
+
+    Usado pelo watcher da pasta de entrada como baseline: um PDF na pasta só é
+    considerado "novo" se seu nome NÃO estiver neste conjunto. Cobre tanto os
+    anos de PDFs históricos já importados quanto a prevenção de reprocessar um
+    arquivo já salvo. Compara por basename para não depender do formato exato do
+    caminho gravado em arquivo_pdf."""
+    with closing(_conectar()) as conn, conn:
+        rows = conn.execute(
+            "SELECT arquivo_pdf FROM notas_fiscais "
+            "WHERE arquivo_pdf IS NOT NULL AND arquivo_pdf <> ''"
+        ).fetchall()
+    return {Path(r["arquivo_pdf"]).name for r in rows}
 
 
 def listar_nfs(filtros_json: str = "{}") -> str:

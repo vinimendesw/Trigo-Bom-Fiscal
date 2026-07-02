@@ -7,10 +7,10 @@ from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtCore import QUrl, QTimer
 from PySide6.QtGui import QIcon
 
-from bridge import Bridge
+from bridge import Bridge, fazer_backup_async, aguardar_backup
 import backup
 
-_BACKUP_INTERVAL_MS = 10 * 60 * 1000  # 10 minutos
+_BACKUP_INTERVAL_MS = 3 * 60 * 1000  # 3 minutos
 
 
 
@@ -78,13 +78,17 @@ def main():
     view.resize(1280, 800)
     view.show()
 
-    # Timer de backup automático a cada 10 minutos
+    # Timer de backup automático a cada 3 minutos — roda em worker (bridge)
+    # para não bloquear a UI quando a pasta de backup é uma unidade lenta.
     timer_backup = QTimer(app)
-    timer_backup.timeout.connect(lambda: backup.fazer_backup())
+    timer_backup.timeout.connect(fazer_backup_async)
     timer_backup.start(_BACKUP_INTERVAL_MS)
 
     def _ao_fechar():
         timer_backup.stop()
+        # Espera um backup em worker terminar antes do snapshot final síncrono,
+        # evitando duas escritas concorrentes no mesmo arquivo de destino.
+        aguardar_backup()
         backup.fazer_backup()
         backup.remover_lock()
 
