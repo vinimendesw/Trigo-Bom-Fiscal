@@ -17,6 +17,18 @@ Entradas mais recentes ficam no topo.
 
 ---
 
+## [2026-07-02] Atualização automática via GitHub Releases (checagem, download e instalação silenciosa)
+
+- Novo módulo `app/atualizacao.py`: consulta `GET /repos/vinimendesw/Trigo-Bom-Fiscal/releases/latest` (GitHub API, sem autenticação), compara a tag com `app.__version__.__version__`, baixa o asset `TrigoBomSetup-X.Y.Z.exe` da release mais nova (verificando o tamanho do download contra o declarado pela API) e dispara o instalador via `ShellExecuteW` com verbo `"runas"` e `/VERYSILENT /SUPPRESSMSGBOX /NORESTART` — sem nenhuma confirmação do app (decisão de produto). A única interação inevitável é o prompt de UAC do próprio Windows, exigido por `PrivilegesRequired=admin` no instalador.
+- `bridge.py`: pipeline assíncrono em `QThreadPool` (`_TarefaAtualizacao`/`_EmissorAtualizacao`) com sinal `atualizacaoStatus` (estados `verificando`/`nenhuma`/`baixando`/`instalando`/`erro`) e slot `verificar_atualizacao()` (com trava contra chamadas concorrentes). Ao terminar de disparar o instalador, pede o fechamento do app (`prontoParaFechar` → `QApplication.quit()`), preservando o backup final e a remoção do lock já existentes no `aboutToQuit` do `main.py`.
+- `main.py`: dispara `bridge.verificar_atualizacao()` 5s após abrir a janela (checagem automática em background, sem bloquear a abertura).
+- UI (`index.html`/`app.js`): card "Atualizações" em Configurações com versão instalada, status da checagem e botão manual "Verificar atualizações" (mesmo pipeline da checagem automática). Toasts informativos (sem pedir confirmação) nos estados baixando/instalando/erro.
+- `installer/trigo_bom.iss`: removido `skipifsilent` da entrada `[Run]` que reabre o TrigoBom após instalar — sem isso, uma instalação silenciosa (disparada pela atualização automática) deixaria o app fechado até o usuário abri-lo manualmente. Comportamento de instalação interativa não muda (checkbox "Abrir agora" continua marcado por padrão, usuário pode desmarcar).
+- Corrigido texto desatualizado em Configurações ("a cada 10 minutos" → "a cada 3 minutos", refletindo o intervalo de backup já reduzido nesta sessão).
+- Validação: testes de lógica pura (`_parse_versao`, `_versao_mais_nova`, seleção de asset, download via `file://` com verificação de integridade de tamanho); teste de integração do `Bridge` com `QApplication` cobrindo a sequência completa de estados, a trava contra checagens concorrentes e o pedido de fechamento do app; suíte completa (245 testes) passando; card de Configurações conferido visualmente no preview.
+
+**Arquivos afetados:** `trigo_bom/app/atualizacao.py` (novo), `trigo_bom/app/bridge.py`, `trigo_bom/app/main.py`, `trigo_bom/app/ui/app.js`, `trigo_bom/app/ui/index.html`, `trigo_bom/installer/trigo_bom.iss`
+
 ## [2026-07-02] Dedup por número da NF passa a consultar o banco diretamente
 
 - A 2ª camada de verificação de duplicidade (por número da NF) na revisão de PDFs detectados deixou de comparar contra a lista em memória `estado.nfs` e passa a consultar o banco diretamente, evitando falso-negativo quando a lista do front-end estiver desatualizada. Novo `repositorio.numero_nf_existe()` + slot `Bridge.numero_nf_existe`; `app.js` atualiza o aviso de forma assíncrona ao abrir a revisão. Comportamento mantido: alerta visível, não bloqueia.

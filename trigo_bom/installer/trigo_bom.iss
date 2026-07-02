@@ -102,10 +102,16 @@ Filename: "{tmp}\tesseract-setup.exe"; \
   StatusMsg: "Instalando Tesseract OCR (aguarde)..."; \
   Flags: waituntilterminated
 
-; 2. Abre o TrigoBom após a instalação (opcional — usuário pode desmarcar)
+; 2. Abre o TrigoBom após a instalação.
+; SEM skipifsilent (2026-07-02): a atualização automática (app/atualizacao.py)
+; dispara este instalador em modo /VERYSILENT depois de fechar o próprio
+; TrigoBom para liberar os arquivos — sem esta entrada rodar também em modo
+; silencioso, o app ficaria fechado até o usuário abri-lo manualmente.
+; Em instalação interativa o comportamento não muda: o checkbox "Abrir agora"
+; continua marcado por padrão e o usuário pode desmarcá-lo.
 Filename: "{app}\{#MyAppExeName}"; \
   Description: "Abrir {#MyAppName} agora"; \
-  Flags: nowait postinstall skipifsilent
+  Flags: nowait postinstall
 
 ; ── [UninstallDelete] ─────────────────────────────────────────────────────────
 ; Lista VAZIA intencionalmente.

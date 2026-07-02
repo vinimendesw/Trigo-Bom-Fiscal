@@ -11,6 +11,7 @@ from bridge import Bridge, fazer_backup_async, aguardar_backup
 import backup
 
 _BACKUP_INTERVAL_MS = 3 * 60 * 1000  # 3 minutos
+_UPDATE_CHECK_DELAY_MS = 5000  # atraso antes da checagem de atualização, para não competir com a abertura da janela
 
 
 
@@ -83,6 +84,11 @@ def main():
     timer_backup = QTimer(app)
     timer_backup.timeout.connect(fazer_backup_async)
     timer_backup.start(_BACKUP_INTERVAL_MS)
+
+    # Checagem de atualização em background, com atraso curto para não competir
+    # com a abertura da janela. Checa/baixa/instala sem pedir confirmação (ver
+    # atualizacao.py); o botão manual em Configurações chama o mesmo slot.
+    QTimer.singleShot(_UPDATE_CHECK_DELAY_MS, bridge.verificar_atualizacao)
 
     def _ao_fechar():
         timer_backup.stop()

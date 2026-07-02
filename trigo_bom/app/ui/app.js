@@ -186,6 +186,9 @@ function iniciar() {
   });
   // Fila de revisão (pasta de entrada) mudou no backend → recarrega e re-renderiza.
   backend.filaRevisaoAtualizada.connect(() => carregarFilaRevisao());
+  // Checagem/instalação de atualização (disparada pelo main.py ao abrir, ou
+  // pelo botão manual em Configurações) — status chega por este sinal.
+  backend.atualizacaoStatus.connect(tratarStatusAtualizacao);
   vincularEventos();
   carregarTudo();
 }
@@ -503,6 +506,9 @@ function vincularEventos() {
   });
   document.getElementById('btn-salvar-config').addEventListener('click', () => {
     backend.salvar_config(JSON.stringify(estado.config), () => mostrarToast('Configurações salvas.'));
+  });
+  document.getElementById('btn-verificar-atualizacao').addEventListener('click', () => {
+    backend.verificar_atualizacao();
   });
 }
 
@@ -1519,4 +1525,43 @@ function renderConfiguracoes() {
     const el = document.getElementById(inputId);
     if (el) el.value = estado.config[chave] || '';
   });
+  backend.versao_atual(raw => {
+    document.getElementById('cfg-versao-atual').textContent = JSON.parse(raw).versao || '—';
+  });
+}
+
+// ─── ATUALIZAÇÕES (GitHub Releases) ────────────────────────────────────────────
+// Checagem automática ao abrir o app (main.py, com atraso) e botão manual em
+// Configurações chamam o mesmo backend.verificar_atualizacao(); o resultado
+// chega por este sinal, com estados intermediários. Ao encontrar versão nova,
+// baixa e instala silenciosamente, sem pedir confirmação — o app fecha sozinho
+// ao final (o instalador o reabre já atualizado).
+function tratarStatusAtualizacao(statusJson) {
+  const s = JSON.parse(statusJson);
+  const linha = document.getElementById('cfg-update-status');
+  const btn   = document.getElementById('btn-verificar-atualizacao');
+
+  switch (s.estado) {
+    case 'verificando':
+      if (linha) linha.textContent = 'Verificando atualizações…';
+      if (btn) btn.disabled = true;
+      break;
+    case 'nenhuma':
+      if (linha) linha.textContent = 'Você está na versão mais recente.';
+      if (btn) btn.disabled = false;
+      break;
+    case 'baixando':
+      if (linha) linha.textContent = `Baixando atualização v${s.versao}…`;
+      mostrarToast(`Nova versão v${s.versao} encontrada — baixando…`);
+      break;
+    case 'instalando':
+      if (linha) linha.textContent = `Instalando v${s.versao}…`;
+      mostrarToast('Instalando atualização — o aplicativo vai reiniciar.');
+      break;
+    case 'erro':
+      if (linha) linha.textContent = 'Falha ao verificar/instalar atualização.';
+      if (btn) btn.disabled = false;
+      mostrarToast('Não foi possível concluir a atualização.', true);
+      break;
+  }
 }

@@ -424,12 +424,28 @@
             <button class="btn-outline btn-escolher-pasta" data-cfg="pasta_backup" data-input="cfg-pasta-bkp">Escolher pasta</button>
           </div>
           <div style="font-size:11px;color:#bbb;margin-top:6px;">
-            O banco é copiado automaticamente para cá após cada alteração e a cada 10 minutos.
+            O banco é copiado automaticamente para cá após cada alteração e a cada 3 minutos.
           </div>
         </div>
 
         <div class="form-actions">
           <button class="btn-save" id="btn-salvar-config">Salvar configurações</button>
+        </div>
+      </div>
+
+      <!-- Atualizações: checagem automática ao abrir o app (main.py) + botão
+           manual. Ao encontrar uma versão nova, baixa e instala silenciosamente
+           sem pedir confirmação — ver atualizacao.py e CHANGELOG.md. -->
+      <div class="card form-card" style="margin-top:20px;">
+        <div class="card-title">Atualizações</div>
+        <div class="field">
+          <div style="font-size:12px;color:#666;">
+            Versão instalada: <span id="cfg-versao-atual">—</span>
+          </div>
+          <div style="font-size:11px;color:#bbb;margin-top:4px;" id="cfg-update-status"></div>
+        </div>
+        <div class="form-actions">
+          <button class="btn-outline" id="btn-verificar-atualizacao">Verificar atualizações</button>
         </div>
       </div>
     </main>

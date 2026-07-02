@@ -7,4 +7,4 @@ Segue semver (MAJOR.MINOR.PATCH). Cada bump deve corresponder a uma tag git
 (vX.Y.Z) e a uma entrada nova no CHANGELOG.md.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.1"

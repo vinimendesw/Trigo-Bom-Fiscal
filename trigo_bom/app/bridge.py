@@ -8,7 +8,7 @@ from PySide6.QtCore import (
     QObject, Slot, Signal, QTimer, QRunnable, QThreadPool, Qt,
     QFileSystemWatcher,
 )
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QFileDialog, QApplication
 
 from extracao.nf import extrair_nf
 from extracao.nf_xml import extrair_nf_xml
@@ -18,6 +18,7 @@ from exportacao.ordem_compra_xlsx import exportar_itens_oc
 from exportacao.lista_compra_xlsx import exportar_itens_lista
 import config
 import backup as bkp
+import atualizacao as upd
 
 
 def _copiar_pdf(caminho_original: str, chave_pasta: str) -> str:
@@ -97,6 +98,55 @@ def aguardar_backup(timeout_ms: int = 10000) -> None:
         time.sleep(0.05)
 
 
+# Verificação/instalação de atualizações (GitHub Releases) — roda inteiramente
+# num worker do QThreadPool (rede + download + subprocess), sem bloquear a GUI.
+# Checagem, download e instalação silenciosa acontecem em sequência, sem pedir
+# confirmação ao usuário em nenhuma etapa (decisão de produto — ver
+# atualizacao.py). Status intermediários (verificando/baixando/instalando/
+# nenhuma/erro) são emitidos para a UI mostrar toasts informativos.
+class _EmissorAtualizacao(QObject):
+    status = Signal(str)          # JSON: {"estado": ..., "versao": ..., ...}
+    prontoParaFechar = Signal()   # instalador disparado — app deve fechar agora
+
+
+class _TarefaAtualizacao(QRunnable):
+    def __init__(self, emissor: "_EmissorAtualizacao"):
+        super().__init__()
+        self._emissor = emissor
+
+    def _emitir(self, **kwargs):
+        self._emissor.status.emit(json.dumps(kwargs, ensure_ascii=False))
+
+    def run(self):
+        self._emitir(estado="verificando")
+        try:
+            info = upd.verificar_atualizacao()
+        except Exception as e:
+            self._emitir(estado="erro", mensagem=str(e))
+            return
+
+        if not info:
+            self._emitir(estado="nenhuma")
+            return
+
+        self._emitir(estado="baixando", versao=info["versao"])
+        try:
+            caminho = upd.baixar_instalador(
+                info["asset_url"], info["asset_nome"], info.get("tamanho")
+            )
+            self._emitir(estado="instalando", versao=info["versao"])
+            upd.instalar_silenciosamente(caminho)
+        except Exception as e:
+            self._emitir(estado="erro", mensagem=str(e), versao=info["versao"])
+            return
+
+        # Instalador disparado com sucesso (elevado, em processo separado) — o
+        # app precisa fechar para liberar os arquivos que ele vai sobrescrever.
+        # O próprio instalador reabre o TrigoBom ao final (trigo_bom.iss, seção
+        # [Run], sem skipifsilent).
+        self._emissor.prontoParaFechar.emit()
+
+
 # Extração assíncrona: rodar a leitura de PDF/XML diretamente no corpo de um
 # @Slot bloqueia a thread da GUI (o event loop do Qt) enquanto o pdfplumber/OCR
 # trabalha, congelando a janela. Aqui a extração é despachada para um worker do
@@ -155,6 +205,10 @@ class Bridge(QObject):
     # pasta de entrada) muda — o JS recarrega a lista via listar_fila_revisao().
     filaRevisaoAtualizada = Signal()
 
+    # Sinal exposto ao JS: status da checagem/instalação de atualização.
+    # JSON: {"estado": "verificando"|"nenhuma"|"baixando"|"instalando"|"erro", ...}
+    atualizacaoStatus = Signal(str)
+
     def __init__(self):
         super().__init__()
         self._pool = QThreadPool.globalInstance()
@@ -166,6 +220,19 @@ class Bridge(QObject):
         self._emissor.pronto.connect(
             self.extracaoConcluida, Qt.ConnectionType.QueuedConnection
         )
+
+        # ── Atualização automática (GitHub Releases) ──────────────────────────
+        self._atualizando = False
+        self._emissor_upd = _EmissorAtualizacao()
+        self._emissor_upd.status.connect(
+            self.atualizacaoStatus, Qt.ConnectionType.QueuedConnection
+        )
+        self._emissor_upd.prontoParaFechar.connect(
+            self._fechar_para_atualizar, Qt.ConnectionType.QueuedConnection
+        )
+        # Libera a trava de "checagem em andamento" quando o worker termina
+        # sem baixar nada (nenhuma versão nova ou erro na checagem/download).
+        self.atualizacaoStatus.connect(self._ao_status_atualizacao)
 
         # ── Pasta de entrada monitorada (reaproveita pasta_nfs) ───────────────
         # Fila de revisão: caminho_completo -> { caminho, nome, dados }.
@@ -418,6 +485,37 @@ class Bridge(QObject):
             self._iniciar_watcher_nfs()
             self.filaRevisaoAtualizada.emit()
         return json.dumps({"ok": True})
+
+    # ── Atualização automática (GitHub Releases) ────────────────────────────────
+
+    @Slot(result=str)
+    def versao_atual(self) -> str:
+        return json.dumps({"versao": upd.VERSAO_ATUAL})
+
+    @Slot()
+    def verificar_atualizacao(self) -> None:
+        """Checa/baixa/instala uma atualização em worker, sem bloquear a GUI.
+        Chamada tanto pela checagem automática (ao abrir o app) quanto pelo
+        botão manual em Configurações — self._atualizando evita duas checagens
+        concorrentes se o usuário clicar o botão enquanto a automática roda."""
+        if self._atualizando:
+            return
+        self._atualizando = True
+        self._pool.start(_TarefaAtualizacao(self._emissor_upd))
+
+    def _ao_status_atualizacao(self, status_json: str) -> None:
+        estado = json.loads(status_json).get("estado")
+        if estado in ("nenhuma", "erro"):
+            self._atualizando = False
+
+    def _fechar_para_atualizar(self) -> None:
+        """Instalador silencioso disparado com sucesso — fecha o app para
+        liberar os arquivos que ele vai sobrescrever. O aboutToQuit do
+        main.py ainda roda normalmente (backup final + remoção do lock)."""
+        self._atualizando = False
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
     # ── Diálogos ──────────────────────────────────────────────────────────────
 
